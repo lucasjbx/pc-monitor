@@ -6,7 +6,7 @@
     irm https://raw.githubusercontent.com/lucasjbx/pc-monitor/main/bootstrap.ps1 | iex
 #>
 
-# Verifica Admin (manuale — #Requires non funziona con iex)
+# Verifica Admin (manuale - #Requires non funziona con iex)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host ""
@@ -22,6 +22,46 @@ $tmp  = "$env:TEMP\pc-monitor-install"
 
 Write-Host ""
 Write-Host "=== PcMonitor Bootstrap ===" -ForegroundColor Cyan
+
+# ── Python ────────────────────────────────────────────────────────────────────
+Write-Host "[0/6] Verifica Python..." -NoNewline
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    Write-Host " non trovato, installazione in corso..." -ForegroundColor Yellow
+    $pyUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+    $pyInstaller = "$env:TEMP\python-installer.exe"
+    try {
+        Invoke-WebRequest $pyUrl -OutFile $pyInstaller
+    } catch {
+        Write-Host "ERRORE download Python: $_" -ForegroundColor Red
+        Read-Host "Premi Invio per chiudere"
+        exit 1
+    }
+    Write-Host "  Installazione Python (silente)..." -ForegroundColor DarkGray
+    $proc = Start-Process $pyInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait -PassThru
+    Remove-Item $pyInstaller -Force -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "ERRORE: installazione Python fallita (exit code $($proc.ExitCode))." -ForegroundColor Red
+        Read-Host "Premi Invio per chiudere"
+        exit 1
+    }
+    # Aggiorna PATH per la sessione corrente
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path","User")
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        Write-Host "ERRORE: python.exe non trovato dopo installazione." -ForegroundColor Red
+        Read-Host "Premi Invio per chiudere"
+        exit 1
+    }
+    $pyVer = & python --version 2>&1
+    Write-Host "  Python installato: $pyVer" -ForegroundColor Green
+} else {
+    $pyVer = & python --version 2>&1
+    Write-Host " OK ($pyVer)" -ForegroundColor Green
+}
+
+# ── Download release ──────────────────────────────────────────────────────────
 Write-Host "Scarico l'ultima release da GitHub..."
 
 try {
