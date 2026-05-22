@@ -58,7 +58,7 @@ Write-Host " OK ($pyVer)" -ForegroundColor Green
 # -- 2. Copia file ------------------------------------------------------------
 Write-Host "[2/6] Copia file in $InstallDir..." -NoNewline
 
-# Ferma e rimuovi il servizio PRIMA di copiare i file (nssm.exe sarebbe bloccato)
+# Ferma servizio e termina processi residui che potrebbero bloccare i file
 $existing = Get-Service $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
     Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
@@ -71,6 +71,10 @@ if ($existing) {
         Start-Sleep 1
     }
 }
+# Termina qualsiasi processo Python o NSSM rimasto attivo
+Stop-Process -Name python -Force -ErrorAction SilentlyContinue
+Stop-Process -Name nssm   -Force -ErrorAction SilentlyContinue
+Start-Sleep 2
 
 # Preserva config.json e positions.json se esistono gia
 $preserveFiles = @("backend\config.json", "backend\positions.json", "piantina.png")
@@ -82,12 +86,14 @@ foreach ($f in $preserveFiles) {
     }
 }
 
-# Rimuovi vecchia installazione completamente (evita Access Denied su file con permessi bloccati)
+# Rimuovi vecchia installazione: reset permessi + elimina con cmd
 if (Test-Path $InstallDir) {
     takeown /F "$InstallDir" /R /A /D Y 2>$null | Out-Null
+    icacls "$InstallDir" /reset /T /Q 2>$null | Out-Null
     icacls "$InstallDir" /grant "Administrators:(OI)(CI)F" /T /Q 2>$null | Out-Null
     attrib -R -S -H "$InstallDir\*" /S /D 2>$null | Out-Null
-    cmd /c "rd /s /q ""$InstallDir""" 2>$null
+    cmd /c rd /s /q "$InstallDir" 2>$null
+    Start-Sleep 1
 }
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
