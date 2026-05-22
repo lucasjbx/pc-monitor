@@ -1,0 +1,6 @@
+flask
+flask-cors
+wakeonlan
+pywin32
+wmi
+python-dotenv

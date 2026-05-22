@@ -1,0 +1,991 @@
+'use strict';
+
+// ── Stato ────────────────────────────────────────────────────────────────────
+let pcs             = [];
+let positions       = {};
+let selectedHost    = null;
+let wolStatus       = {};     // hostname → null | 'sending' | 'sent' | 'error'
+let shutdownStatus  = {};     // hostname → null | 'confirm' | 'sending' | 'ok' | 'error'
+let fetching        = false;
+
+// Stato editor
+let editorPos       = {};
+let editorSelected  = null;
+let _drag           = null;   // { hostname, el } durante il trascinamento
+
+// Stato impostazioni
+let settingsConfig  = {};          // copia locale della config durante editing
+let settingsEditIdx = null;        // indice PC in modifica (-1 = nuovo)
+
+// Stato zoom mappa
+let zoom = 1.0;
+let panX = 0;
+let panY = 0;
+let _pan = null;   // { startX, startY, startPanX, startPanY }
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  // Header
+  document.getElementById('btn-refresh').addEventListener('click', () => loadPcs(true));
+  document.getElementById('btn-editor').addEventListener('click', openEditor);
+  document.getElementById('btn-configure').addEventListener('click', openEditor);
+  document.getElementById('btn-settings').addEventListener('click', openSettings);
+
+  // Panel PC
+  document.getElementById('btn-panel-close').addEventListener('click', closePanel);
+
+  // Editor posizioni
+  document.getElementById('btn-editor-close').addEventListener('click', closeEditor);
+  document.getElementById('btn-save-positions').addEventListener('click', savePositions);
+  document.getElementById('editor-img').addEventListener('click', handleEditorClick);
+  document.getElementById('editor-pc-list').addEventListener('click', handleEditorListClick);
+
+  // Drag editor + pan mappa — mousemove/mouseup globali
+  document.addEventListener('mousemove', e => {
+    if (_drag) {
+      const img  = document.getElementById('editor-img');
+      const rect = img.getBoundingClientRect();
+      const x    = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const y    = Math.max(0, Math.min(1, (e.clientY - rect.top)  / rect.height));
+      _drag.el.style.left = `${x * 100}%`;
+      _drag.el.style.top  = `${y * 100}%`;
+      editorPos[_drag.hostname] = { x, y };
+    } else if (_pan) {
+      panX = _pan.startPanX + (e.clientX - _pan.startX);
+      panY = _pan.startPanY + (e.clientY - _pan.startY);
+      applyTransform();
+    }
+  });
+  document.addEventListener('mouseup', () => {
+    if (_drag) {
+      _drag.el.classList.remove('dragging');
+      _drag = null;
+      renderEditorMarkers();
+      renderEditorSidebar();
+    }
+    if (_pan) {
+      _pan = null;
+      document.getElementById('floorplan-scaler').classList.remove('panning');
+    }
+  });
+
+  // Zoom mappa
+  document.getElementById('btn-zoom-in').addEventListener('click',    () => changeZoom(1.25));
+  document.getElementById('btn-zoom-out').addEventListener('click',   () => changeZoom(0.8));
+  document.getElementById('btn-zoom-reset').addEventListener('click', resetZoom);
+
+  const scaler = document.getElementById('floorplan-scaler');
+  scaler.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor  = e.deltaY < 0 ? 1.1 : 0.9;
+    const newZoom = Math.max(0.5, Math.min(4, zoom * factor));
+    const wrapper = document.getElementById('floorplan-wrapper');
+    const rect    = wrapper.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const px = (mx - panX) / zoom;
+    const py = (my - panY) / zoom;
+    panX = mx - px * newZoom;
+    panY = my - py * newZoom;
+    zoom = newZoom;
+    applyTransform();
+  }, { passive: false });
+
+  // Pan con mouse — drag sulla piantina (sempre attivo)
+  document.getElementById('floorplan-wrapper').addEventListener('mousedown', e => {
+    if (e.target.closest('.marker') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
+    e.preventDefault();
+    _pan = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY };
+    scaler.classList.add('panning');
+  });
+
+  // Impostazioni
+  document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
+  document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+  document.getElementById('btn-toggle-pass').addEventListener('click', togglePassVisibility);
+  document.getElementById('btn-test-wmi').addEventListener('click', testWmiConnection);
+  document.getElementById('btn-add-pc').addEventListener('click', showAddPcForm);
+  document.getElementById('btn-pc-form-ok').addEventListener('click', confirmPcForm);
+  document.getElementById('btn-pc-form-cancel').addEventListener('click', hidePcForm);
+  document.getElementById('btn-upload-floorplan').addEventListener('click', uploadFloorplan);
+  document.getElementById('floorplan-file-input').addEventListener('change', () => {
+    const f = document.getElementById('floorplan-file-input').files[0];
+    document.getElementById('btn-upload-floorplan').textContent = f ? `Carica "${f.name}"` : 'Carica';
+  });
+
+  // Tabs impostazioni — event delegation
+  document.querySelector('.settings-tabs').addEventListener('click', e => {
+    const tab = e.target.closest('.settings-tab');
+    if (!tab) return;
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.settings-pane').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+
+  // Update
+  document.getElementById('update-badge').addEventListener('click', openUpdatePopover);
+  document.getElementById('btn-apply-update').addEventListener('click', applyUpdate);
+  document.addEventListener('click', e => {
+    const popover = document.getElementById('update-popover');
+    if (!popover.classList.contains('hidden') &&
+        !popover.contains(e.target) &&
+        !document.getElementById('update-badge').contains(e.target)) {
+      popover.classList.add('hidden');
+    }
+  });
+
+  await loadSedeName();
+  await loadPositions();
+  await loadPcs();
+  setInterval(loadPcs, 5000);
+  checkForUpdates();
+  setInterval(checkForUpdates, 3600000); // ogni ora
+});
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function loadPcs(manual = false) {
+  if (fetching && !manual) return;
+  fetching = true;
+  const btn = document.getElementById('btn-refresh');
+  if (manual) btn.textContent = '⟳ …';
+
+  try {
+    const res = await fetch('/api/pcs');
+    if (!res.ok) throw new Error();
+    pcs = await res.json();
+    clearError();
+    const now = new Date();
+    document.getElementById('last-update').textContent =
+      'Aggiornato alle ' + now.toLocaleTimeString('it-IT');
+    renderStats();
+    renderMarkers();
+    if (selectedHost) {
+      const pc = pcs.find(p => p.hostname === selectedHost);
+      if (pc) updatePanel(pc);
+    }
+  } catch {
+    showError('Impossibile connettersi al backend. Assicurati che Flask sia in esecuzione.');
+  } finally {
+    fetching = false;
+    btn.textContent = '↻ Aggiorna';
+    document.getElementById('loading').classList.add('hidden');
+  }
+}
+
+async function loadSedeName() {
+  try {
+    const res  = await fetch('/api/config');
+    const cfg  = await res.json();
+    const name = cfg?.sede?.name;
+    if (name) document.getElementById('sede-title').textContent = name;
+  } catch {}
+}
+
+async function loadPositions() {
+  try {
+    const res = await fetch('/api/positions');
+    positions = await res.json();
+  } catch {}
+}
+
+// ── Render principale ─────────────────────────────────────────────────────────
+function renderStats() {
+  const online  = pcs.filter(p => p.online).length;
+  const offline = pcs.filter(p => !p.online && p.ip).length;
+  const unknown = pcs.filter(p => !p.ip).length;
+  document.getElementById('stats').innerHTML =
+    `<span class="stat online">${online} online</span>` +
+    `<span class="stat offline">${offline} offline</span>` +
+    (unknown ? `<span class="stat unknown">${unknown} N/D</span>` : '');
+}
+
+function renderMarkers() {
+  const placed = Object.keys(positions);
+  const hasPos = placed.length > 0;
+  document.getElementById('floorplan-wrapper').classList.toggle('hidden', !hasPos);
+  document.getElementById('floorplan-empty').classList.toggle('hidden', hasPos);
+  const container = document.getElementById('markers');
+  container.innerHTML = '';
+
+  for (const hostname of placed) {
+    const pos = positions[hostname];
+    const pc  = pcs.find(p => p.hostname === hostname) || { hostname, ip: '', online: false, user: '' };
+    const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const sel = hostname === selectedHost ? ' selected' : '';
+
+    const el = document.createElement('div');
+    el.className = `marker ${cls}${sel}`;
+    el.style.left = `${pos.x * 100}%`;
+    el.style.top  = `${pos.y * 100}%`;
+    const sessionTime = pc.since ? elapsed(pc.since) : null;
+    el.innerHTML  =
+      `<div class="marker-dot"></div>` +
+      `<div class="marker-label">` +
+        `<span class="marker-hostname">${hostname}</span>` +
+        (pc.user ? `<span class="marker-user">${pc.user.slice(0, 13)}</span>` : '') +
+        (sessionTime ? `<span class="marker-user">⏱ ${sessionTime}</span>` : '') +
+      `</div>`;
+    el.addEventListener('click', () => openPanel(pc));
+    container.appendChild(el);
+  }
+
+  renderUnpositioned();
+}
+
+// ── Pannello PC ───────────────────────────────────────────────────────────────
+function openPanel(pc) {
+  selectedHost = pc.hostname;
+  renderMarkers();
+  updatePanel(pc);
+  document.getElementById('panel').classList.remove('hidden');
+}
+
+function updatePanel(pc) {
+  const statusCls   = pc.online ? 'online' : pc.ip ? 'offline' : 'unknown';
+  const statusLabel = pc.online ? 'Online' : pc.ip ? 'Offline' : 'N/D';
+
+  document.getElementById('panel-dot').className        = `panel-dot ${statusCls}`;
+  document.getElementById('panel-hostname').textContent = pc.hostname;
+
+  document.getElementById('panel-badges').innerHTML =
+    `<span class="badge badge-${statusCls}">${statusLabel}</span>` +
+    (pc.manufacturer ? `<span class="badge badge-neutral">${pc.manufacturer}</span>` : '');
+
+  let rows =
+    `<tr><td class="panel-label">IP</td><td class="panel-value">${pc.ip || '—'}</td></tr>` +
+    `<tr><td class="panel-label">MAC</td><td class="panel-value panel-mono">${pc.mac || '—'}</td></tr>`;
+
+  if (pc.model) {
+    rows += `<tr><td class="panel-label">Modello</td><td class="panel-value">${pc.model}</td></tr>`;
+  }
+  if (pc.os) {
+    rows += `<tr><td class="panel-label">OS</td><td class="panel-value">${pc.os}</td></tr>`;
+  }
+  if (pc.net_speed) {
+    rows += `<tr><td class="panel-label">Rete</td><td class="panel-value">${fmtSpeed(pc.net_speed)}</td></tr>`;
+  }
+
+  if (pc.user) {
+    rows += `<tr><td class="panel-label">Username</td><td class="panel-value panel-mono">${pc.user}</td></tr>`;
+    const nameVal = pc.fullname
+      ? `<strong>${pc.fullname}</strong>`
+      : `<span class="muted">—</span>`;
+    rows += `<tr><td class="panel-label">Nome</td><td class="panel-value">${nameVal}</td></tr>`;
+  } else if (pc.online) {
+    rows += `<tr><td class="panel-label">Utente</td><td class="panel-value"><span class="muted">Nessun utente loggato</span></td></tr>`;
+  }
+
+  if (pc.since) {
+    rows += `<tr><td class="panel-label">Sessione</td><td class="panel-value">${elapsed(pc.since, true)}</td></tr>`;
+  }
+  if (pc.cpu != null) {
+    const cpuColor = pc.cpu > 85 ? '#ef4444' : pc.cpu > 60 ? '#f59e0b' : '#22c55e';
+    rows += `<tr><td class="panel-label">CPU</td><td class="panel-value">${barHtml(pc.cpu, cpuColor)}</td></tr>`;
+  }
+  if (pc.ram_pct != null) {
+    const ramColor = pc.ram_pct > 90 ? '#ef4444' : pc.ram_pct > 75 ? '#f59e0b' : '#3b82f6';
+    const ramLabel = pc.ram_gb
+      ? `${Math.round(pc.ram_pct / 100 * pc.ram_gb)}/${pc.ram_gb} GB`
+      : `${pc.ram_pct}%`;
+    rows += `<tr><td class="panel-label">RAM</td><td class="panel-value">${barHtml(pc.ram_pct, ramColor, ramLabel)}</td></tr>`;
+  }
+  if (pc.disk_total != null && pc.disk_free != null) {
+    const diskUsed = pc.disk_total - pc.disk_free;
+    const diskPct  = Math.round(diskUsed / pc.disk_total * 100);
+    const diskColor = diskPct > 90 ? '#ef4444' : diskPct > 75 ? '#f59e0b' : '#22c55e';
+    const gbUsed  = (diskUsed  / 1073741824).toFixed(0);
+    const gbTotal = (pc.disk_total / 1073741824).toFixed(0);
+    const diskLabel = pc.disk_type
+      ? `${gbUsed}/${gbTotal} GB · ${pc.disk_type}`
+      : `${gbUsed}/${gbTotal} GB`;
+    rows += `<tr><td class="panel-label">Disco C:</td><td class="panel-value">${barHtml(diskPct, diskColor, diskLabel)}</td></tr>`;
+  }
+  if (pc.uptime) {
+    rows += `<tr><td class="panel-label">Acceso da</td><td class="panel-value">${elapsed(pc.uptime, true)}</td></tr>`;
+  }
+
+  document.getElementById('panel-table').innerHTML = rows;
+  renderPanelActions(pc);
+}
+
+function renderPanelActions(pc) {
+  const container = document.getElementById('panel-actions');
+  container.innerHTML = '';
+
+  // Wake on LAN (solo se offline e ha MAC)
+  if (!pc.online && pc.mac) {
+    const wol = wolStatus[pc.hostname];
+    const btn = document.createElement('button');
+    btn.className = `btn-action wol${wol === 'sent' ? ' sent' : ''}`;
+    btn.disabled  = wol === 'sending';
+    btn.textContent =
+      wol === 'sending' ? '⟳ Invio in corso…' :
+      wol === 'sent'    ? '✓ Pacchetto inviato' :
+      wol === 'error'   ? '✕ Errore — riprova' :
+                          '⚡ Accendi (Wake on LAN)';
+    btn.addEventListener('click', () => doWol(pc.hostname));
+    container.appendChild(btn);
+  }
+
+  // Spegnimento (solo se online e ha IP)
+  if (pc.online && pc.ip) {
+    const sd = shutdownStatus[pc.hostname];
+
+    if (sd === 'confirm') {
+      const box = document.createElement('div');
+      box.className = 'shutdown-confirm';
+      box.innerHTML =
+        `<p class="shutdown-warning">Spegnere <strong>${pc.hostname}</strong>?` +
+        (pc.user ? ` L'utente <strong>${pc.user}</strong> potrebbe perdere dati non salvati.` : '') +
+        `</p><div class="shutdown-buttons">` +
+        `<button class="btn-shutdown-yes">Sì, spegni</button>` +
+        `<button class="btn-shutdown-no">Annulla</button></div>`;
+      box.querySelector('.btn-shutdown-yes').addEventListener('click', () => doShutdown(pc.hostname));
+      box.querySelector('.btn-shutdown-no').addEventListener('click', () => {
+        shutdownStatus[pc.hostname] = null;
+        renderPanelActions(pc);
+      });
+      container.appendChild(box);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = `btn-action shutdown${sd === 'ok' ? ' ok' : ''}`;
+      btn.disabled  = sd === 'sending';
+      btn.textContent =
+        sd === 'sending' ? '⟳ Spegnimento…' :
+        sd === 'ok'      ? '✓ Comando inviato' :
+        sd === 'error'   ? '✕ Errore — riprova' :
+                           '⏻ Spegni PC';
+      btn.addEventListener('click', () => {
+        shutdownStatus[pc.hostname] = 'confirm';
+        renderPanelActions(pc);
+      });
+      container.appendChild(btn);
+    }
+  }
+
+  if (!pc.ip) {
+    const note = document.createElement('p');
+    note.className   = 'panel-note';
+    note.textContent = 'MAC non disponibile — WOL non supportato.';
+    container.appendChild(note);
+  }
+}
+
+function closePanel() {
+  selectedHost = null;
+  document.getElementById('panel').classList.add('hidden');
+  renderMarkers();
+}
+
+// ── WOL ───────────────────────────────────────────────────────────────────────
+async function doWol(hostname) {
+  wolStatus[hostname] = 'sending';
+  refreshPanelIfOpen(hostname);
+  try {
+    const res  = await fetch(`/api/wol/${hostname}`, { method: 'POST' });
+    const data = await res.json();
+    wolStatus[hostname] = data.ok ? 'sent' : 'error';
+    if (data.ok) setTimeout(() => { wolStatus[hostname] = null; refreshPanelIfOpen(hostname); }, 5000);
+  } catch {
+    wolStatus[hostname] = 'error';
+  }
+  refreshPanelIfOpen(hostname);
+}
+
+// ── Shutdown ──────────────────────────────────────────────────────────────────
+async function doShutdown(hostname) {
+  shutdownStatus[hostname] = 'sending';
+  refreshPanelIfOpen(hostname);
+  try {
+    const res  = await fetch(`/api/shutdown/${hostname}`, { method: 'POST' });
+    const data = await res.json();
+    shutdownStatus[hostname] = data.ok ? 'ok' : 'error';
+    if (data.ok) setTimeout(() => { shutdownStatus[hostname] = null; refreshPanelIfOpen(hostname); }, 5000);
+  } catch {
+    shutdownStatus[hostname] = 'error';
+  }
+  refreshPanelIfOpen(hostname);
+}
+
+function refreshPanelIfOpen(hostname) {
+  if (selectedHost !== hostname) return;
+  const pc = pcs.find(p => p.hostname === hostname);
+  if (pc) renderPanelActions(pc);
+}
+
+// ── Editor posizioni ──────────────────────────────────────────────────────────
+function openEditor() {
+  editorPos      = { ...positions };
+  editorSelected = null;
+  renderEditorSidebar();
+  renderEditorMarkers();
+  updateEditorInstruction();
+  document.getElementById('editor-overlay').classList.remove('hidden');
+}
+
+function closeEditor() {
+  if (_drag) { _drag.el.classList.remove('dragging'); _drag = null; }
+  document.getElementById('editor-overlay').classList.add('hidden');
+}
+
+function handleEditorClick(e) {
+  if (!editorSelected) return;
+  const img  = document.getElementById('editor-img');
+  const rect = img.getBoundingClientRect();
+  const x    = (e.clientX - rect.left) / rect.width;
+  const y    = (e.clientY - rect.top)  / rect.height;
+
+  editorPos[editorSelected] = { x, y };
+
+  const unplaced = pcs.map(p => p.hostname).filter(h => !editorPos[h] && h !== editorSelected);
+  editorSelected = unplaced[0] || null;
+
+  renderEditorSidebar();
+  renderEditorMarkers();
+  updateEditorInstruction();
+}
+
+function handleEditorListClick(e) {
+  const removeBtn = e.target.closest('.editor-remove');
+  if (removeBtn) {
+    const h = removeBtn.dataset.hostname;
+    delete editorPos[h];
+    if (editorSelected === h) editorSelected = null;
+    renderEditorSidebar();
+    renderEditorMarkers();
+    updateEditorInstruction();
+    return;
+  }
+  const item = e.target.closest('.editor-pc-item');
+  if (item) {
+    editorSelected = item.dataset.hostname;
+    renderEditorSidebar();
+    renderEditorMarkers();
+    updateEditorInstruction();
+  }
+}
+
+function updateEditorInstruction() {
+  const el  = document.getElementById('editor-instruction');
+  const img = document.getElementById('editor-img');
+  if (editorSelected) {
+    el.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
+    el.className   = 'editor-instruction active';
+    img.classList.add('crosshair');
+  } else {
+    el.textContent = 'Seleziona un PC dalla lista →';
+    el.className   = 'editor-instruction';
+    img.classList.remove('crosshair');
+  }
+}
+
+function renderEditorSidebar() {
+  const allHosts = pcs.map(p => p.hostname);
+  const placed   = allHosts.filter(h =>  editorPos[h]);
+  const unplaced = allHosts.filter(h => !editorPos[h]);
+
+  let html = '';
+  if (unplaced.length > 0) {
+    html += `<div class="editor-section-title">Da posizionare <span class="editor-count">${unplaced.length}</span></div>`;
+    for (const h of unplaced) {
+      html += `<div class="editor-pc-item${editorSelected === h ? ' active' : ''}" data-hostname="${h}">${h}</div>`;
+    }
+  }
+  if (placed.length > 0) {
+    html += `<div class="editor-section-title" style="margin-top:8px">Posizionati <span class="editor-count ok">${placed.length}</span></div>`;
+    for (const h of placed) {
+      html += `<div class="editor-pc-item placed${editorSelected === h ? ' active' : ''}" data-hostname="${h}">
+                 <span>${h}</span>
+                 <button class="editor-remove" data-hostname="${h}">×</button>
+               </div>`;
+    }
+  }
+
+  document.getElementById('editor-pc-list').innerHTML = html;
+  document.getElementById('btn-save-positions').textContent = `Salva (${placed.length} PC)`;
+}
+
+function renderEditorMarkers() {
+  const container = document.getElementById('editor-markers');
+  container.innerHTML = '';
+  for (const [hostname, pos] of Object.entries(editorPos)) {
+    const el = document.createElement('div');
+    el.className  = `editor-marker${editorSelected === hostname ? ' active' : ''}`;
+    el.style.left = `${pos.x * 100}%`;
+    el.style.top  = `${pos.y * 100}%`;
+    el.dataset.hostname = hostname;
+
+    const label = document.createElement('span');
+    label.textContent = hostname;
+    el.appendChild(label);
+
+    // Bottone × per rimozione diretta dalla mappa
+    const removeBtn = document.createElement('button');
+    removeBtn.className   = 'editor-marker-remove';
+    removeBtn.textContent = '×';
+    removeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      delete editorPos[hostname];
+      if (editorSelected === hostname) editorSelected = null;
+      renderEditorSidebar();
+      renderEditorMarkers();
+      updateEditorInstruction();
+    });
+    el.appendChild(removeBtn);
+
+    // Click per selezionare (solo se non si stava trascinando)
+    el.addEventListener('click', e => {
+      if (_drag) return;
+      e.stopPropagation();
+      editorSelected = hostname;
+      renderEditorSidebar();
+      renderEditorMarkers();
+      updateEditorInstruction();
+    });
+
+    // Drag start
+    el.addEventListener('mousedown', e => {
+      if (e.target.closest('.editor-marker-remove')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      _drag = { hostname, el };
+      editorSelected = hostname;
+      el.classList.add('dragging');
+      renderEditorSidebar();
+      updateEditorInstruction();
+    });
+
+    container.appendChild(el);
+  }
+}
+
+async function savePositions() {
+  const btn = document.getElementById('btn-save-positions');
+  btn.textContent = 'Salvataggio…';
+  btn.disabled    = true;
+  try {
+    await fetch('/api/positions', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(editorPos),
+    });
+    positions = { ...editorPos };
+    renderMarkers();
+    closeEditor();
+  } catch {
+    btn.textContent = '✕ Errore — riprova';
+    btn.disabled    = false;
+  }
+}
+
+// ── Impostazioni ──────────────────────────────────────────────────────────────
+async function openSettings() {
+  try {
+    const res = await fetch('/api/config');
+    settingsConfig = await res.json();
+  } catch {
+    settingsConfig = {};
+  }
+  populateSettingsForm();
+  renderPcsTable();
+  hidePcForm();
+  // Resetta result WMI e floorplan
+  setSettingsResult('wmi-test-result', '', false);
+  setSettingsResult('floorplan-upload-result', '', false);
+  document.getElementById('floorplan-file-input').value = '';
+  document.getElementById('btn-upload-floorplan').textContent = 'Carica';
+  // Reload anteprima piantina
+  document.getElementById('settings-floorplan-preview').src = '/api/floorplan?' + Date.now();
+  document.getElementById('settings-overlay').classList.remove('hidden');
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.add('hidden');
+}
+
+function populateSettingsForm() {
+  const s = settingsConfig;
+  document.getElementById('cfg-sede-name').value    = s?.sede?.name          ?? '';
+  document.getElementById('cfg-poll-interval').value = s?.sede?.poll_interval ?? 10;
+  document.getElementById('cfg-wol-broadcast').value = s?.network?.wol_broadcast ?? '';
+  document.getElementById('cfg-gateway-ip').value    = s?.network?.gateway_ip    ?? '';
+  document.getElementById('cfg-dc-ip').value         = s?.network?.dc_ip         ?? '';
+  document.getElementById('cfg-wmi-user').value      = s?.wmi?.user ?? '';
+  document.getElementById('cfg-wmi-pass').value      = s?.wmi?.pass ?? '';   // backend ritorna ***
+}
+
+function collectSettingsForm() {
+  return {
+    sede: {
+      name:          document.getElementById('cfg-sede-name').value.trim(),
+      poll_interval: parseInt(document.getElementById('cfg-poll-interval').value, 10) || 10,
+    },
+    network: {
+      wol_broadcast: document.getElementById('cfg-wol-broadcast').value.trim(),
+      gateway_ip:    document.getElementById('cfg-gateway-ip').value.trim(),
+      dc_ip:         document.getElementById('cfg-dc-ip').value.trim(),
+    },
+    wmi: {
+      user: document.getElementById('cfg-wmi-user').value.trim(),
+      pass: document.getElementById('cfg-wmi-pass').value,   // "***" o nuova password
+    },
+    pcs: settingsConfig.pcs || [],
+  };
+}
+
+async function saveSettings() {
+  const btn = document.getElementById('btn-save-settings');
+  btn.textContent = 'Salvataggio…';
+  btn.disabled    = true;
+  try {
+    const cfg = collectSettingsForm();
+    const res = await fetch('/api/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(cfg),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      // Aggiorna titolo sede nell'header
+      if (cfg.sede?.name) {
+        document.getElementById('sede-title').textContent = cfg.sede.name;
+      }
+      btn.textContent = '✓ Salvato';
+      setTimeout(() => {
+        btn.textContent = 'Salva impostazioni';
+        btn.disabled    = false;
+        closeSettings();
+        loadPcs(true);  // ricarica subito
+      }, 1200);
+    } else {
+      btn.textContent = '✕ Errore — riprova';
+      btn.disabled    = false;
+    }
+  } catch {
+    btn.textContent = '✕ Errore — riprova';
+    btn.disabled    = false;
+  }
+}
+
+function togglePassVisibility() {
+  const inp = document.getElementById('cfg-wmi-pass');
+  inp.type  = inp.type === 'password' ? 'text' : 'password';
+}
+
+async function testWmiConnection() {
+  const ip   = document.getElementById('cfg-wmi-test-ip').value.trim();
+  const user = document.getElementById('cfg-wmi-user').value.trim();
+  const pass = document.getElementById('cfg-wmi-pass').value;
+  const btn  = document.getElementById('btn-test-wmi');
+
+  if (!ip) {
+    setSettingsResult('wmi-test-result', '⚠ Inserisci un IP di test', false);
+    return;
+  }
+
+  btn.textContent = '⟳ Test…';
+  btn.disabled    = true;
+  setSettingsResult('wmi-test-result', '', false);
+
+  try {
+    const res  = await fetch('/api/config/test-wmi', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ip, user, pass }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      setSettingsResult('wmi-test-result', `✓ Connessione riuscita — hostname: ${data.hostname}`, true);
+    } else {
+      setSettingsResult('wmi-test-result', `✕ Errore: ${data.error}`, false);
+    }
+  } catch {
+    setSettingsResult('wmi-test-result', '✕ Impossibile contattare il backend', false);
+  } finally {
+    btn.textContent = 'Testa connessione';
+    btn.disabled    = false;
+  }
+}
+
+function setSettingsResult(id, msg, ok) {
+  const el = document.getElementById(id);
+  if (!msg) { el.classList.add('hidden'); return; }
+  el.textContent = msg;
+  el.className   = `settings-hint settings-wmi-result ${ok ? 'ok' : 'err'}`;
+  el.classList.remove('hidden');
+}
+
+// ── Tabella PC nell'editor impostazioni ────────────────────────────────────────
+function renderPcsTable() {
+  const tbody = document.getElementById('pcs-tbody');
+  const pcsArr = settingsConfig.pcs || [];
+  tbody.innerHTML = pcsArr.map((pc, i) =>
+    `<tr>
+      <td class="settings-cell">${escHtml(pc.hostname)}</td>
+      <td class="settings-cell">${escHtml(pc.ip)}</td>
+      <td class="settings-cell settings-mono">${escHtml(pc.mac)}</td>
+      <td class="settings-cell">${escHtml(pc.manufacturer)}</td>
+      <td class="settings-cell settings-cell-actions">
+        <button class="settings-row-btn" onclick="showEditPcForm(${i})">✎</button>
+        <button class="settings-row-btn settings-row-btn-del" onclick="deletePc(${i})">✕</button>
+      </td>
+    </tr>`
+  ).join('');
+}
+
+function showAddPcForm() {
+  settingsEditIdx = -1;
+  document.getElementById('pc-form-hostname').value     = '';
+  document.getElementById('pc-form-ip').value           = '';
+  document.getElementById('pc-form-mac').value          = '';
+  document.getElementById('pc-form-manufacturer').value = '';
+  document.getElementById('btn-pc-form-ok').textContent = 'Aggiungi';
+  document.getElementById('pc-form').classList.remove('hidden');
+  document.getElementById('pc-form-hostname').focus();
+}
+
+function showEditPcForm(idx) {
+  settingsEditIdx = idx;
+  const pc = (settingsConfig.pcs || [])[idx];
+  if (!pc) return;
+  document.getElementById('pc-form-hostname').value     = pc.hostname     || '';
+  document.getElementById('pc-form-ip').value           = pc.ip           || '';
+  document.getElementById('pc-form-mac').value          = pc.mac          || '';
+  document.getElementById('pc-form-manufacturer').value = pc.manufacturer || '';
+  document.getElementById('btn-pc-form-ok').textContent = 'Aggiorna';
+  document.getElementById('pc-form').classList.remove('hidden');
+  document.getElementById('pc-form-hostname').focus();
+}
+
+function hidePcForm() {
+  document.getElementById('pc-form').classList.add('hidden');
+  settingsEditIdx = null;
+}
+
+function confirmPcForm() {
+  const pc = {
+    hostname:     document.getElementById('pc-form-hostname').value.trim(),
+    ip:           document.getElementById('pc-form-ip').value.trim(),
+    mac:          document.getElementById('pc-form-mac').value.trim(),
+    manufacturer: document.getElementById('pc-form-manufacturer').value.trim(),
+  };
+  if (!pc.hostname) {
+    document.getElementById('pc-form-hostname').focus();
+    return;
+  }
+  if (!settingsConfig.pcs) settingsConfig.pcs = [];
+
+  if (settingsEditIdx === -1) {
+    // Verifica hostname duplicato
+    if (settingsConfig.pcs.some(p => p.hostname === pc.hostname)) {
+      alert(`Hostname "${pc.hostname}" già presente.`);
+      return;
+    }
+    settingsConfig.pcs.push(pc);
+  } else {
+    settingsConfig.pcs[settingsEditIdx] = pc;
+  }
+  hidePcForm();
+  renderPcsTable();
+}
+
+function deletePc(idx) {
+  const pc = (settingsConfig.pcs || [])[idx];
+  if (!pc) return;
+  if (!confirm(`Eliminare ${pc.hostname}?`)) return;
+  settingsConfig.pcs.splice(idx, 1);
+  renderPcsTable();
+}
+
+// ── Upload piantina ───────────────────────────────────────────────────────────
+async function uploadFloorplan() {
+  const input = document.getElementById('floorplan-file-input');
+  const file  = input.files[0];
+  if (!file) {
+    setSettingsResult('floorplan-upload-result', '⚠ Seleziona un file prima', false);
+    return;
+  }
+  const btn = document.getElementById('btn-upload-floorplan');
+  btn.textContent = '⟳ Caricamento…';
+  btn.disabled    = true;
+
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res  = await fetch('/api/floorplan/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.ok) {
+      setSettingsResult('floorplan-upload-result', '✓ Piantina aggiornata', true);
+      // Forza reload immagine aggiungendo timestamp al src
+      const ts = Date.now();
+      document.getElementById('settings-floorplan-preview').src = `/api/floorplan?t=${ts}`;
+      document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
+      document.getElementById('editor-img').src                 = `/api/floorplan?t=${ts}`;
+      document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
+    } else {
+      setSettingsResult('floorplan-upload-result', `✕ ${data.error}`, false);
+    }
+  } catch {
+    setSettingsResult('floorplan-upload-result', '✕ Errore di rete', false);
+  } finally {
+    btn.textContent = 'Carica';
+    btn.disabled    = false;
+    input.value     = '';
+  }
+}
+
+// ── Zoom mappa ────────────────────────────────────────────────────────────────
+function applyTransform() {
+  const scaler = document.getElementById('floorplan-scaler');
+  if (!scaler) return;
+  scaler.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  const badge = document.getElementById('zoom-badge');
+  if (badge) badge.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function changeZoom(factor) {
+  const newZoom = Math.max(0.5, Math.min(4, zoom * factor));
+  const wrapper = document.getElementById('floorplan-wrapper');
+  const rect    = wrapper.getBoundingClientRect();
+  const cx = rect.width  / 2;
+  const cy = rect.height / 2;
+  const px = (cx - panX) / zoom;
+  const py = (cy - panY) / zoom;
+  panX = cx - px * newZoom;
+  panY = cy - py * newZoom;
+  zoom = newZoom;
+  applyTransform();
+}
+
+function resetZoom() {
+  zoom = 1; panX = 0; panY = 0;
+  applyTransform();
+}
+
+// ── PC non posizionati ────────────────────────────────────────────────────────
+function renderUnpositioned() {
+  const section = document.getElementById('unpositioned-section');
+  if (!section) return;
+
+  const unposPcs = pcs.filter(p => !positions[p.hostname]);
+
+  section.classList.toggle('hidden', unposPcs.length === 0);
+
+  const countEl = document.getElementById('unpositioned-count');
+  if (countEl) countEl.textContent = unposPcs.length;
+
+  const list = document.getElementById('unpositioned-list');
+  list.innerHTML = unposPcs.map(pc => {
+    const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    return `<div class="unpos-card" data-hostname="${escHtml(pc.hostname)}">
+      <span class="unpos-dot ${cls}"></span>
+      <div class="unpos-info">
+        <span class="unpos-hostname">${escHtml(pc.hostname)}</span>
+        ${pc.user ? `<span class="unpos-user">${escHtml(pc.user)}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.unpos-card').forEach(card => {
+    const hostname = card.dataset.hostname;
+    const pc = pcs.find(p => p.hostname === hostname);
+    if (pc) card.addEventListener('click', () => openPanel(pc));
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function elapsed(isoStr, showTime = false) {
+  if (!isoStr) return null;
+  const d = new Date(isoStr);
+  const ms = Date.now() - d.getTime();
+  if (ms < 0) return null;
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const dur = h > 0 ? `${h}h ${m}m` : `${m}m`;
+  if (!showTime) return dur;
+  const time = d.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+  return `${dur} <span class="muted">· ${time}</span>`;
+}
+
+function fmtSpeed(bps) {
+  if (!bps) return null;
+  if (bps >= 1e9) return `${(bps / 1e9).toFixed(0)} Gbps`;
+  if (bps >= 1e6) return `${(bps / 1e6).toFixed(0)} Mbps`;
+  return `${bps} bps`;
+}
+
+function barHtml(pct, color, label) {
+  const safe = Math.max(0, Math.min(100, pct));
+  const lbl  = label !== undefined ? label : `${safe}%`;
+  return `<div class="pc-bar"><div class="pc-bar-fill" style="width:${safe}%;background:${color}"></div><span class="pc-bar-label">${lbl}</span></div>`;
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-banner');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+function clearError() {
+  document.getElementById('error-banner').classList.add('hidden');
+}
+function escHtml(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Aggiornamenti ─────────────────────────────────────────────────────────────
+async function checkForUpdates() {
+  try {
+    const res  = await fetch('/api/update/check');
+    if (!res.ok) return;
+    const data = await res.json();
+    const badge = document.getElementById('update-badge');
+    if (data.update_available) {
+      badge.textContent = `↑ v${data.latest}`;
+      badge.classList.remove('hidden');
+      badge.dataset.current = data.current;
+      badge.dataset.latest  = data.latest;
+      badge.dataset.notes   = data.release_notes || '';
+    } else {
+      badge.classList.add('hidden');
+    }
+  } catch (_) {}
+}
+
+function openUpdatePopover() {
+  const badge   = document.getElementById('update-badge');
+  const popover = document.getElementById('update-popover');
+  document.getElementById('update-current').textContent = badge.dataset.current || '';
+  document.getElementById('update-latest').textContent  = badge.dataset.latest  || '';
+  const notes = badge.dataset.notes || '';
+  document.getElementById('update-notes').textContent   = notes ? notes : '';
+  document.getElementById('update-notes').style.display = notes ? '' : 'none';
+  popover.classList.toggle('hidden');
+}
+
+async function applyUpdate() {
+  const overlay = document.getElementById('update-overlay');
+  const msg     = document.getElementById('update-overlay-msg');
+  document.getElementById('update-popover').classList.add('hidden');
+  overlay.classList.remove('hidden');
+  msg.textContent = 'Aggiornamento in corso…';
+  try {
+    const res  = await fetch('/api/update/apply', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      msg.textContent = `Aggiornato a v${data.version}. Riavvio in corso…`;
+      let secs = 15;
+      const timer = setInterval(() => {
+        secs--;
+        msg.textContent = `Aggiornato a v${data.version}. Ricarico tra ${secs}s…`;
+        if (secs <= 0) { clearInterval(timer); location.reload(); }
+      }, 1000);
+    } else {
+      msg.textContent = `Errore: ${data.error || 'sconosciuto'}`;
+      setTimeout(() => overlay.classList.add('hidden'), 4000);
+    }
+  } catch (_) {
+    msg.textContent = 'Errore di connessione.';
+    setTimeout(() => overlay.classList.add('hidden'), 4000);
+  }
+}

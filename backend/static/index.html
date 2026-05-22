@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ciro Monitor</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <header class="header">
+    <div class="header-left">
+      <h1 class="title">
+        <span id="sede-title">Ciro Monitor</span>
+        <span id="update-badge" class="update-badge hidden"></span>
+      </h1>
+      <span id="last-update" class="last-update"></span>
+    </div>
+
+    <!-- Popover aggiornamento -->
+    <div id="update-popover" class="update-popover hidden">
+      <div class="update-popover-row">
+        <span class="update-popover-label">Versione attuale</span>
+        <span id="update-current" class="update-popover-val"></span>
+      </div>
+      <div class="update-popover-row">
+        <span class="update-popover-label">Nuova versione</span>
+        <span id="update-latest" class="update-popover-val update-new"></span>
+      </div>
+      <div id="update-notes" class="update-notes"></div>
+      <button id="btn-apply-update" class="btn-save" style="width:100%;margin-top:10px">↑ Aggiorna ora</button>
+    </div>
+
+    <!-- Overlay aggiornamento in corso -->
+    <div id="update-overlay" class="update-overlay hidden">
+      <div class="update-overlay-box">
+        <div class="update-spinner"></div>
+        <p id="update-overlay-msg">Aggiornamento in corso…</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="stats" class="stats"></div>
+      <button id="btn-editor" class="btn">Modifica posizioni</button>
+      <button id="btn-settings" class="btn">⚙ Impostazioni</button>
+      <button id="btn-refresh" class="btn">↻ Aggiorna</button>
+    </div>
+  </header>
+
+  <div id="error-banner" class="error-banner hidden"></div>
+
+  <main class="main">
+    <div id="loading" class="loading">Caricamento postazioni...</div>
+
+    <div class="main-layout">
+      <!-- Area mappa -->
+      <div class="map-area">
+        <div id="floorplan-empty" class="floorplan-empty hidden">
+          <p>Nessuna posizione configurata.</p>
+          <button class="btn" id="btn-configure">Configura posizioni</button>
+        </div>
+
+        <div id="floorplan-wrapper" class="floorplan-wrapper hidden">
+          <!-- Controlli zoom -->
+          <div class="floorplan-zoom-controls">
+            <button class="zoom-btn" id="btn-zoom-in"  title="Zoom in">+</button>
+            <button class="zoom-btn" id="btn-zoom-out" title="Zoom out">−</button>
+            <button class="zoom-btn" id="btn-zoom-reset" title="Reset zoom">⊙</button>
+            <span class="zoom-badge" id="zoom-badge">100%</span>
+          </div>
+          <!-- Scaler: riceve transform per zoom/pan -->
+          <div id="floorplan-scaler" class="floorplan-scaler">
+            <div id="floorplan-container" class="floorplan-container">
+              <img id="floorplan-img" src="/api/floorplan" alt="Piantina" draggable="false">
+              <div id="markers"></div>
+            </div>
+          </div>
+          <!-- Legenda overlay — sempre visibile nell'angolo in basso a destra -->
+          <div class="legend">
+            <span class="legend-item"><span class="legend-dot" style="background:#22c55e"></span>Online</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Offline</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#9ca3af"></span>N/D</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar PC non posizionati -->
+      <div id="unpositioned-section" class="unpositioned-sidebar hidden">
+        <div class="unpositioned-header-bar">
+          <span>Non sulla mappa</span>
+          <span id="unpositioned-count" class="editor-count">0</span>
+        </div>
+        <div id="unpositioned-list" class="unpositioned-list"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Pannello PC -->
+  <div id="panel" class="panel hidden">
+    <button class="panel-close" id="btn-panel-close">✕</button>
+    <div class="panel-header">
+      <div id="panel-dot" class="panel-dot"></div>
+      <h2 id="panel-hostname" class="panel-hostname"></h2>
+    </div>
+    <div id="panel-badges" class="panel-badges"></div>
+    <table id="panel-table" class="panel-table"></table>
+    <div id="panel-actions"></div>
+  </div>
+
+  <!-- Editor posizioni -->
+  <div id="editor-overlay" class="editor-overlay hidden">
+    <div class="editor-container">
+      <div class="editor-map">
+        <div id="editor-instruction" class="editor-instruction">Seleziona un PC dalla lista →</div>
+        <div class="editor-image-wrapper">
+          <img id="editor-img" src="/api/floorplan" alt="Piantina" draggable="false">
+          <div id="editor-markers"></div>
+        </div>
+      </div>
+      <div class="editor-sidebar">
+        <div class="editor-sidebar-header">
+          <h2>Posizioni PC</h2>
+          <button class="panel-close" id="btn-editor-close">✕</button>
+        </div>
+        <div id="editor-pc-list" class="editor-pc-list"></div>
+        <div class="editor-footer">
+          <button id="btn-save-positions" class="btn-save">Salva</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pannello Impostazioni -->
+  <div id="settings-overlay" class="editor-overlay hidden">
+    <div class="editor-container">
+
+      <!-- Area principale con tabs -->
+      <div class="editor-map settings-main">
+
+        <!-- Tab bar -->
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="generale">Generale</button>
+          <button class="settings-tab" data-tab="rete">Rete</button>
+          <button class="settings-tab" data-tab="wmi">WMI</button>
+          <button class="settings-tab" data-tab="pcs">PC</button>
+          <button class="settings-tab" data-tab="piantina">Piantina</button>
+        </div>
+
+        <!-- Contenuto tab -->
+        <div class="settings-content">
+
+          <!-- Tab: Generale -->
+          <div class="settings-pane active" id="tab-generale">
+            <div class="settings-section">
+              <label class="settings-label">Nome sede</label>
+              <input class="settings-input" id="cfg-sede-name" type="text" placeholder="es. Ciro Marina — Sede">
+              <p class="settings-hint">Appare nel titolo della pagina.</p>
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">Intervallo polling (secondi)</label>
+              <input class="settings-input" id="cfg-poll-interval" type="number" min="5" max="300" placeholder="10">
+              <p class="settings-hint">Ogni quanti secondi viene eseguito il ping e la query WMI su tutti i PC.</p>
+            </div>
+          </div>
+
+          <!-- Tab: Rete -->
+          <div class="settings-pane" id="tab-rete">
+            <div class="settings-section">
+              <label class="settings-label">Broadcast WOL</label>
+              <input class="settings-input" id="cfg-wol-broadcast" type="text" placeholder="192.168.x.255">
+              <p class="settings-hint">Indirizzo broadcast usato per i magic packet Wake-on-LAN.</p>
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">Gateway IP</label>
+              <input class="settings-input" id="cfg-gateway-ip" type="text" placeholder="192.168.x.1">
+              <p class="settings-hint">Usato per determinare l'interfaccia di rete corretta.</p>
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">Domain Controller IP</label>
+              <input class="settings-input" id="cfg-dc-ip" type="text" placeholder="192.168.x.5">
+              <p class="settings-hint">IP del server AD. Usato per recuperare nome e cognome degli utenti loggati.</p>
+            </div>
+          </div>
+
+          <!-- Tab: WMI -->
+          <div class="settings-pane" id="tab-wmi">
+            <div class="settings-section">
+              <label class="settings-label">Utente WMI</label>
+              <input class="settings-input" id="cfg-wmi-user" type="text" placeholder="DOMINIO\utente">
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">Password WMI</label>
+              <div class="settings-password-wrap">
+                <input class="settings-input" id="cfg-wmi-pass" type="password" placeholder="••••••••">
+                <button class="settings-toggle-pass" id="btn-toggle-pass" title="Mostra/nascondi">👁</button>
+              </div>
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">IP di test</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input class="settings-input" id="cfg-wmi-test-ip" type="text" placeholder="192.168.x.x" style="flex:1">
+                <button class="btn" id="btn-test-wmi">Testa connessione</button>
+              </div>
+              <p class="settings-hint settings-wmi-result hidden" id="wmi-test-result"></p>
+            </div>
+          </div>
+
+          <!-- Tab: PC -->
+          <div class="settings-pane" id="tab-pcs">
+            <div class="settings-pc-toolbar">
+              <button class="btn" id="btn-add-pc">+ Aggiungi PC</button>
+            </div>
+
+            <!-- Form aggiungi/modifica PC -->
+            <div id="pc-form" class="pc-form hidden">
+              <div class="pc-form-grid">
+                <div>
+                  <label class="settings-label">Hostname</label>
+                  <input class="settings-input" id="pc-form-hostname" type="text" placeholder="CI0001">
+                </div>
+                <div>
+                  <label class="settings-label">IP</label>
+                  <input class="settings-input" id="pc-form-ip" type="text" placeholder="192.168.x.x">
+                </div>
+                <div>
+                  <label class="settings-label">MAC</label>
+                  <input class="settings-input" id="pc-form-mac" type="text" placeholder="AA:BB:CC:DD:EE:FF">
+                </div>
+                <div>
+                  <label class="settings-label">Produttore</label>
+                  <input class="settings-input" id="pc-form-manufacturer" type="text" placeholder="HP, Dell…">
+                </div>
+              </div>
+              <div class="pc-form-actions">
+                <button class="btn-save" id="btn-pc-form-ok" style="min-width:100px">Aggiungi</button>
+                <button class="btn" id="btn-pc-form-cancel">Annulla</button>
+              </div>
+            </div>
+
+            <div class="settings-table-wrap">
+              <table class="settings-table" id="pcs-table">
+                <thead>
+                  <tr>
+                    <th>Hostname</th><th>IP</th><th>MAC</th><th>Produttore</th><th></th>
+                  </tr>
+                </thead>
+                <tbody id="pcs-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Tab: Piantina -->
+          <div class="settings-pane" id="tab-piantina">
+            <div class="settings-section">
+              <label class="settings-label">Immagine attuale</label>
+              <img id="settings-floorplan-preview" src="/api/floorplan" alt="Piantina" class="settings-floorplan-preview">
+            </div>
+            <div class="settings-section">
+              <label class="settings-label">Carica nuova piantina (PNG o JPG)</label>
+              <input type="file" id="floorplan-file-input" accept=".png,.jpg,.jpeg" class="settings-file-input">
+              <button class="btn" id="btn-upload-floorplan">Carica</button>
+              <p class="settings-hint settings-wmi-result hidden" id="floorplan-upload-result"></p>
+            </div>
+          </div>
+
+        </div><!-- /settings-content -->
+      </div><!-- /settings-main -->
+
+      <!-- Sidebar destra: info + salva -->
+      <div class="editor-sidebar settings-sidebar">
+        <div class="editor-sidebar-header">
+          <h2>Impostazioni</h2>
+          <button class="panel-close" id="btn-settings-close">✕</button>
+        </div>
+        <div class="settings-sidebar-body">
+          <p class="settings-sidebar-note">Le modifiche vengono applicate subito senza riavviare il server.</p>
+        </div>
+        <div class="editor-footer">
+          <button id="btn-save-settings" class="btn-save">Salva impostazioni</button>
+        </div>
+      </div>
+
+    </div><!-- /editor-container -->
+  </div><!-- /settings-overlay -->
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
