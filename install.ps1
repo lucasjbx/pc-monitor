@@ -97,6 +97,12 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "pip install fallito. Controlla la connessione internet."
     exit 1
 }
+# pywin32 richiede post-install per registrare le DLL di sistema
+$pyScripts = & python -c "import sys, os; print(os.path.join(sys.prefix, 'Scripts'))" 2>$null
+$postInstall = Join-Path $pyScripts "pywin32_postinstall.py"
+if (Test-Path $postInstall) {
+    & python $postInstall -install 2>$null | Out-Null
+}
 Write-Host " OK" -ForegroundColor Green
 
 # -- 4. Servizio Windows (NSSM) -----------------------------------------------
@@ -145,7 +151,12 @@ Write-Host " OK" -ForegroundColor Green
 # -- 6. Avvia e verifica ------------------------------------------------------
 Write-Host "[6/6] Avvio servizio..." -NoNewline
 Start-Service $ServiceName
-Start-Sleep 4
+# Aspetta fino a 15 secondi che il servizio sia Running
+$deadline = (Get-Date).AddSeconds(15)
+do {
+    Start-Sleep 2
+    $svc = Get-Service $ServiceName
+} while ($svc.Status -ne "Running" -and (Get-Date) -lt $deadline)
 $svc = Get-Service $ServiceName
 if ($svc.Status -eq "Running") {
     Write-Host " OK" -ForegroundColor Green
