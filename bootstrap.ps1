@@ -17,6 +17,8 @@ if (-not $isAdmin) {
     exit 1
 }
 
+$ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest altrimenti e' lentissimo
+
 $repo = "lucasjbx/pc-monitor"
 $tmp  = "$env:TEMP\pc-monitor-install"
 
