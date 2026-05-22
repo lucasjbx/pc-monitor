@@ -12,6 +12,7 @@ piantina_orig.png
 
 # File con dati di rete reali
 *.txt
+!version.txt
 *.csv
 
 # Python
