@@ -111,9 +111,12 @@ if (-not (Test-Path $nssm)) {
 # Rimuovi servizio esistente se presente
 $existing = Get-Service $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
-    & $nssm stop   $ServiceName 2>$null
+    Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
+    $ErrorActionPreference = "SilentlyContinue"
     & $nssm remove $ServiceName confirm 2>$null
+    $ErrorActionPreference = "Stop"
+    Start-Sleep 1
 }
 
 & $nssm install $ServiceName python "$InstallDir\backend\app.py"
