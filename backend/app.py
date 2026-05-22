@@ -78,7 +78,7 @@ def lookup_fullname_ad(username: str) -> str:
 
 def load_config() -> dict:
     """Carica config.json da disco e ritorna il dict"""
-    with open(CONFIG_FILE, encoding="utf-8") as f:
+    with open(CONFIG_FILE, encoding="utf-8-sig") as f:  # utf-8-sig rimuove BOM se presente (scritto da PowerShell 5.1)
         return json_lib.load(f)
 
 
