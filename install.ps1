@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Installa PcMonitor come servizio Windows su questo server.
@@ -28,6 +27,12 @@ param(
     [string]$SourceDir   = $PSScriptRoot,
     [string]$ConfigFile  = ""
 )
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "ERRORE: eseguire come Administrator." -ForegroundColor Red
+    exit 1
+}
 
 $ErrorActionPreference = "Stop"
 
