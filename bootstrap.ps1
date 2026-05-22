@@ -25,7 +25,7 @@ $tmp  = "$env:TEMP\pc-monitor-install"
 Write-Host ""
 Write-Host "=== PcMonitor Bootstrap ===" -ForegroundColor Cyan
 
-# ── Python ────────────────────────────────────────────────────────────────────
+# -- Python --------------------------------------------------------------------
 Write-Host "[0/6] Verifica Python..." -NoNewline
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) {
@@ -63,7 +63,7 @@ if (-not $python) {
     Write-Host " OK ($pyVer)" -ForegroundColor Green
 }
 
-# ── Download release ──────────────────────────────────────────────────────────
+# -- Download release ----------------------------------------------------------
 Write-Host "Scarico l'ultima release da GitHub..."
 
 try {

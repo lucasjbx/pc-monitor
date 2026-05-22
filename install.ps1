@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Installa PcMonitor come servizio Windows su questo server.
-    Normalmente chiamato da bootstrap.ps1, ma può essere eseguito direttamente.
+    Normalmente chiamato da bootstrap.ps1, ma puo essere eseguito direttamente.
 
 .PARAMETER InstallDir
     Cartella di installazione (default: C:\PcMonitor)
@@ -18,7 +18,7 @@
 .PARAMETER ConfigFile
     Percorso a un config.json pre-compilato da usare per questa sede.
     Es: -ConfigFile "C:\configs\ciro.json"
-    Se non specificato, verrà usato config.example.json come punto di partenza.
+    Se non specificato, verra usato config.example.json come punto di partenza.
 #>
 param(
     [string]$InstallDir  = "C:\PcMonitor",
@@ -35,6 +35,7 @@ if (-not $isAdmin) {
 }
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"
 
 Write-Host ""
 Write-Host "=== Installazione PcMonitor ===" -ForegroundColor Cyan
@@ -43,7 +44,7 @@ Write-Host "  Porta:     $Port"
 Write-Host "  Servizio:  $ServiceName"
 Write-Host ""
 
-# ── 1. Verifica Python ────────────────────────────────────────────────────────
+# -- 1. Verifica Python -------------------------------------------------------
 Write-Host "[1/6] Verifica Python..." -NoNewline
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) {
@@ -54,10 +55,10 @@ if (-not $python) {
 $pyVer = & python --version 2>&1
 Write-Host " OK ($pyVer)" -ForegroundColor Green
 
-# ── 2. Copia file ─────────────────────────────────────────────────────────────
+# -- 2. Copia file ------------------------------------------------------------
 Write-Host "[2/6] Copia file in $InstallDir..." -NoNewline
 
-# Preserva config.json e positions.json se esistono già
+# Preserva config.json e positions.json se esistono gia
 $preserveFiles = @("backend\config.json", "backend\positions.json", "piantina.png")
 $preserved = @{}
 foreach ($f in $preserveFiles) {
@@ -84,11 +85,11 @@ if ($ConfigFile -and (Test-Path $ConfigFile)) {
     Write-Host "  Config sede: $ConfigFile" -ForegroundColor DarkGray
 } elseif (-not (Test-Path "$InstallDir\backend\config.json")) {
     Copy-Item "$InstallDir\backend\config.example.json" "$InstallDir\backend\config.json" -Force
-    Write-Host "  Nessun config specificato - copiato config.example.json. Configurare dall'UI." -ForegroundColor Yellow
+    Write-Host "  Nessun config trovato - copiato config.example.json. Configurare dall'UI." -ForegroundColor Yellow
 }
 Write-Host " OK" -ForegroundColor Green
 
-# ── 3. pip install ────────────────────────────────────────────────────────────
+# -- 3. pip install -----------------------------------------------------------
 Write-Host "[3/6] Installazione dipendenze Python..." -NoNewline
 & python -m pip install -r "$InstallDir\backend\requirements.txt" --quiet
 if ($LASTEXITCODE -ne 0) {
@@ -98,7 +99,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host " OK" -ForegroundColor Green
 
-# ── 4. Servizio Windows (NSSM) ────────────────────────────────────────────────
+# -- 4. Servizio Windows (NSSM) -----------------------------------------------
 Write-Host "[4/6] Configurazione servizio Windows..." -NoNewline
 $nssm = "$InstallDir\tools\nssm.exe"
 if (-not (Test-Path $nssm)) {
@@ -116,16 +117,16 @@ if ($existing) {
 }
 
 & $nssm install $ServiceName python "$InstallDir\backend\app.py"
-& $nssm set $ServiceName AppDirectory   "$InstallDir\backend"
-& $nssm set $ServiceName Start          SERVICE_AUTO_START
+& $nssm set $ServiceName AppDirectory    "$InstallDir\backend"
+& $nssm set $ServiceName Start           SERVICE_AUTO_START
 & $nssm set $ServiceName AppRestartDelay 5000
-& $nssm set $ServiceName AppStdout      "$InstallDir\logs\stdout.log"
-& $nssm set $ServiceName AppStderr      "$InstallDir\logs\stderr.log"
-& $nssm set $ServiceName DisplayName    "PcMonitor"
-& $nssm set $ServiceName Description    "Monitoraggio PC in rete locale — lucasjbx/pc-monitor"
+& $nssm set $ServiceName AppStdout       "$InstallDir\logs\stdout.log"
+& $nssm set $ServiceName AppStderr       "$InstallDir\logs\stderr.log"
+& $nssm set $ServiceName DisplayName     "PcMonitor"
+& $nssm set $ServiceName Description     "Monitoraggio PC in rete locale - lucasjbx/pc-monitor"
 Write-Host " OK" -ForegroundColor Green
 
-# ── 5. Regola Firewall ────────────────────────────────────────────────────────
+# -- 5. Regola Firewall -------------------------------------------------------
 Write-Host "[5/6] Regola Windows Firewall (porta $Port)..." -NoNewline
 $ruleName = "PcMonitor porta $Port"
 Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
@@ -138,7 +139,7 @@ New-NetFirewallRule `
     -Profile     "Domain,Private" | Out-Null
 Write-Host " OK" -ForegroundColor Green
 
-# ── 6. Avvia e verifica ───────────────────────────────────────────────────────
+# -- 6. Avvia e verifica ------------------------------------------------------
 Write-Host "[6/6] Avvio servizio..." -NoNewline
 Start-Service $ServiceName
 Start-Sleep 4
@@ -146,11 +147,11 @@ $svc = Get-Service $ServiceName
 if ($svc.Status -eq "Running") {
     Write-Host " OK" -ForegroundColor Green
     Write-Host ""
-    Write-Host "══════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "  PcMonitor installato e in esecuzione!" -ForegroundColor Green
-    Write-Host "  Accesso: http://$(hostname):$Port" -ForegroundColor Yellow
-    Write-Host "  Log:     $InstallDir\logs\" -ForegroundColor Gray
-    Write-Host "══════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  Accesso: http://$(hostname):$Port"     -ForegroundColor Yellow
+    Write-Host "  Log:     $InstallDir\logs\"            -ForegroundColor Gray
+    Write-Host "==========================================" -ForegroundColor Cyan
 } else {
     Write-Host " ERRORE (status: $($svc.Status))" -ForegroundColor Red
     Write-Host "Controlla i log: $InstallDir\logs\stderr.log" -ForegroundColor Yellow
