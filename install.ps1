@@ -82,10 +82,14 @@ foreach ($f in $preserveFiles) {
     }
 }
 
+# Rimuovi vecchia installazione completamente (evita Access Denied su file con permessi bloccati)
+if (Test-Path $InstallDir) {
+    takeown /F "$InstallDir" /R /A /D Y 2>$null | Out-Null
+    icacls "$InstallDir" /grant "Administrators:(OI)(CI)F" /T /Q 2>$null | Out-Null
+    attrib -R -S -H "$InstallDir\*" /S /D 2>$null | Out-Null
+    cmd /c "rd /s /q ""$InstallDir""" 2>$null
+}
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-# Resetta permessi e ownership per evitare Access Denied su reinstallazione
-takeown /F "$InstallDir" /R /A /D Y 2>$null | Out-Null
-icacls "$InstallDir" /grant "Administrators:(OI)(CI)F" /T /Q 2>$null | Out-Null
 Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
 
 # Ripristina file preservati
