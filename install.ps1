@@ -84,7 +84,7 @@ if ($ConfigFile -and (Test-Path $ConfigFile)) {
     Write-Host "  Config sede: $ConfigFile" -ForegroundColor DarkGray
 } elseif (-not (Test-Path "$InstallDir\backend\config.json")) {
     Copy-Item "$InstallDir\backend\config.example.json" "$InstallDir\backend\config.json" -Force
-    Write-Host "  Nessun config specificato — copiato config.example.json. Configurare dall'UI." -ForegroundColor Yellow
+    Write-Host "  Nessun config specificato - copiato config.example.json. Configurare dall'UI." -ForegroundColor Yellow
 }
 Write-Host " OK" -ForegroundColor Green
 
