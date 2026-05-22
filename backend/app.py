@@ -56,16 +56,25 @@ def lookup_fullname_ad(username: str) -> str:
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = cfg.get("wmi", {}).get("pass", "")
 
-    if dc_ip and username:
+    if username:
         try:
             import wmi
             import pythoncom
             pythoncom.CoInitialize()
             try:
-                c        = wmi.WMI(computer=dc_ip, user=wmi_user, password=wmi_pass)
+                # Prima prova locale: se siamo sul DC, Win32_UserAccount
+                # restituisce tutti gli utenti di dominio senza credenziali
+                c        = wmi.WMI()
                 accounts = c.Win32_UserAccount(Name=username)
                 if accounts and accounts[0].FullName:
                     fullname = accounts[0].FullName
+
+                # Fallback: connessione remota al DC con credenziali
+                if not fullname and dc_ip and wmi_user and wmi_pass:
+                    c2       = wmi.WMI(computer=dc_ip, user=wmi_user, password=wmi_pass)
+                    accounts = c2.Win32_UserAccount(Name=username)
+                    if accounts and accounts[0].FullName:
+                        fullname = accounts[0].FullName
             finally:
                 pythoncom.CoUninitialize()
         except Exception:
