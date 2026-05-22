@@ -664,33 +664,43 @@ def update_apply():
             extract_dir
         )
 
-        # 4. Copia file preservando config.json e positions.json
+        # 4. Genera uno script PowerShell che ferma il servizio, copia i file e lo riavvia.
+        #    Cosi' la copia avviene DOPO che il servizio si e' fermato (nessun file bloccato).
         install_root = os.path.normpath(os.path.join(BASE_DIR, ".."))
-        for root, dirs, files in os.walk(inner):
-            rel_root = os.path.relpath(root, inner)
-            dest_root = os.path.join(install_root, rel_root)
-            os.makedirs(dest_root, exist_ok=True)
-            for fname in files:
-                if fname in PRESERVE_ON_UPDATE:
-                    continue
-                src  = os.path.join(root, fname)
-                dest = os.path.join(dest_root, fname)
-                shutil.copy2(src, dest)
+        preserve_str = " ".join(f"'{p}'" for p in PRESERVE_ON_UPDATE)
+        ps_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference    = 'SilentlyContinue'
+Start-Sleep 3
+Stop-Service '{SERVICE_NAME}' -Force
+Start-Sleep 3
 
-        # 5. Aggiorna version.txt
-        with open(VERSION_FILE, "w", encoding="utf-8") as f:
-            f.write(new_ver + "\n")
+$inner    = '{inner}'
+$destRoot = '{install_root}'
+$preserve = @({preserve_str})
 
-        # 6. Riavvia servizio in thread separato (dopo aver risposto al client)
-        def _restart():
-            time.sleep(3)
-            subprocess.Popen(
-                ["powershell", "-Command", f"Restart-Service {SERVICE_NAME}"],
-                creationflags=subprocess.DETACHED_PROCESS
-            )
-        threading.Thread(target=_restart, daemon=True).start()
+Get-ChildItem -Path $inner -Recurse -File | ForEach-Object {{
+    if ($preserve -contains $_.Name) {{ return }}
+    $rel  = $_.FullName.Substring($inner.Length).TrimStart('\\')
+    $dest = Join-Path $destRoot $rel
+    $dir  = Split-Path $dest -Parent
+    if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Force $dir | Out-Null }}
+    Copy-Item $_.FullName $dest -Force
+}}
 
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+[System.IO.File]::WriteAllText('{VERSION_FILE}', '{new_ver}')
+Start-Service '{SERVICE_NAME}'
+Remove-Item '{tmp_dir}' -Recurse -Force -ErrorAction SilentlyContinue
+"""
+        ps_path = os.path.join(tmp_dir, "do_update.ps1")
+        with open(ps_path, "w", encoding="utf-8") as f:
+            f.write(ps_script)
+
+        # 5. Lancia lo script come processo completamente separato e rispondi subito
+        subprocess.Popen(
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_path],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
         return jsonify({"ok": True, "version": new_ver})
 
     except Exception as e:
