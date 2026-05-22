@@ -83,6 +83,9 @@ foreach ($f in $preserveFiles) {
 }
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
+# Resetta permessi e ownership per evitare Access Denied su reinstallazione
+takeown /F "$InstallDir" /R /A /D Y 2>$null | Out-Null
+icacls "$InstallDir" /grant "Administrators:(OI)(CI)F" /T /Q 2>$null | Out-Null
 Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
 
 # Ripristina file preservati
