@@ -1,0 +1,23 @@
+{
+  "sede": {
+    "name": "Nome Sede",
+    "poll_interval": 10
+  },
+  "network": {
+    "wol_broadcast": "192.168.x.255",
+    "gateway_ip": "192.168.x.1",
+    "dc_ip": "192.168.x.5"
+  },
+  "wmi": {
+    "user": "DOMINIO\\utente",
+    "pass": ""
+  },
+  "pcs": [
+    {
+      "hostname": "PC0001",
+      "ip": "192.168.x.x",
+      "mac": "AA:BB:CC:DD:EE:FF",
+      "manufacturer": "HP"
+    }
+  ]
+}

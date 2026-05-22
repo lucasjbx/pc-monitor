@@ -15,12 +15,18 @@
 
 .PARAMETER SourceDir
     Cartella sorgente (default: cartella dello script)
+
+.PARAMETER ConfigFile
+    Percorso a un config.json pre-compilato da usare per questa sede.
+    Es: -ConfigFile "C:\configs\ciro.json"
+    Se non specificato, verrà usato config.example.json come punto di partenza.
 #>
 param(
     [string]$InstallDir  = "C:\PcMonitor",
     [int]   $Port        = 5000,
     [string]$ServiceName = "PcMonitor",
-    [string]$SourceDir   = $PSScriptRoot
+    [string]$SourceDir   = $PSScriptRoot,
+    [string]$ConfigFile  = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +72,15 @@ foreach ($f in $preserved.Keys) {
 }
 
 New-Item -ItemType Directory -Force "$InstallDir\logs" | Out-Null
+
+# Applica config sede se specificata
+if ($ConfigFile -and (Test-Path $ConfigFile)) {
+    Copy-Item $ConfigFile "$InstallDir\backend\config.json" -Force
+    Write-Host "  Config sede: $ConfigFile" -ForegroundColor DarkGray
+} elseif (-not (Test-Path "$InstallDir\backend\config.json")) {
+    Copy-Item "$InstallDir\backend\config.example.json" "$InstallDir\backend\config.json" -Force
+    Write-Host "  Nessun config specificato — copiato config.example.json. Configurare dall'UI." -ForegroundColor Yellow
+}
 Write-Host " OK" -ForegroundColor Green
 
 # ── 3. pip install ────────────────────────────────────────────────────────────
