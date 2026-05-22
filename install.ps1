@@ -58,6 +58,20 @@ Write-Host " OK ($pyVer)" -ForegroundColor Green
 # -- 2. Copia file ------------------------------------------------------------
 Write-Host "[2/6] Copia file in $InstallDir..." -NoNewline
 
+# Ferma e rimuovi il servizio PRIMA di copiare i file (nssm.exe sarebbe bloccato)
+$existing = Get-Service $ServiceName -ErrorAction SilentlyContinue
+if ($existing) {
+    Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+    Start-Sleep 2
+    $nssmExe = "$InstallDir\tools\nssm.exe"
+    if (Test-Path $nssmExe) {
+        $ErrorActionPreference = "SilentlyContinue"
+        & $nssmExe remove $ServiceName confirm 2>$null
+        $ErrorActionPreference = "Stop"
+        Start-Sleep 1
+    }
+}
+
 # Preserva config.json e positions.json se esistono gia
 $preserveFiles = @("backend\config.json", "backend\positions.json", "piantina.png")
 $preserved = @{}
@@ -112,17 +126,6 @@ if (-not (Test-Path $nssm)) {
     Write-Host " ERRORE" -ForegroundColor Red
     Write-Error "nssm.exe non trovato in $InstallDir\tools\"
     exit 1
-}
-
-# Rimuovi servizio esistente se presente
-$existing = Get-Service $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-    Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
-    Start-Sleep 2
-    $ErrorActionPreference = "SilentlyContinue"
-    & $nssm remove $ServiceName confirm 2>$null
-    $ErrorActionPreference = "Stop"
-    Start-Sleep 1
 }
 
 & $nssm install $ServiceName python "$InstallDir\backend\app.py"
