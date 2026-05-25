@@ -86,45 +86,22 @@ foreach ($f in $preserveFiles) {
     }
 }
 
+# Se la directory esiste, SYSTEM la cancella (SYSTEM e' owner dei file creati dal servizio)
+if (Test-Path $InstallDir) {
+    $cleanBat = "C:\Windows\Temp\pcmonitor_clean.bat"
+    $doneFlag = "C:\Windows\Temp\pcmonitor_clean_done.txt"
+    Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
+    "@echo off`r`nrd /s /q `"$InstallDir`"`r`necho done > `"$doneFlag`"" | Set-Content $cleanBat -Encoding ASCII
+    schtasks /create /f /tn "PcMonitorClean" /tr "`"$cleanBat`"" /sc once /st 00:00 /ru SYSTEM | Out-Null
+    schtasks /run /tn "PcMonitorClean" | Out-Null
+    $deadline = (Get-Date).AddSeconds(20)
+    while (-not (Test-Path $doneFlag) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+    schtasks /delete /f /tn "PcMonitorClean" | Out-Null
+    Remove-Item $cleanBat, $doneFlag -Force -ErrorAction SilentlyContinue
+}
+
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-
-# Stadio A: copia i sorgenti in C:\Windows\Temp (accessibile da SYSTEM)
-# Necessario perche $SourceDir e' in AppData\Local\Temp dell'utente, inaccessibile a SYSTEM
-$sysStage = "C:\Windows\Temp\pcmonitor_stage"
-Remove-Item $sysStage -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $sysStage | Out-Null
-Copy-Item -Path "$SourceDir\*" -Destination $sysStage -Recurse -Force
-
-# Stadio B: SYSTEM copia da Windows\Temp a C:\PcMonitor (bypassa permessi bloccati)
-$doneFlag = "C:\Windows\Temp\pcmonitor_copy_done.txt"
-$copyPs1  = "C:\Windows\Temp\pcmonitor_copy.ps1"
-Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
-[System.IO.File]::WriteAllText($copyPs1, @"
-robocopy '$sysStage' '$InstallDir' /E /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS
-`$LASTEXITCODE | Out-File '$doneFlag' -Encoding ASCII
-"@)
-
-$action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NonInteractive -File `"$copyPs1`""
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
-Register-ScheduledTask -TaskName "PcMonitorCopy" -Action $action -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
-Start-ScheduledTask -TaskName "PcMonitorCopy"
-
-$deadline = (Get-Date).AddSeconds(60)
-while (-not (Test-Path $doneFlag) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
-Unregister-ScheduledTask -TaskName "PcMonitorCopy" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-Remove-Item $copyPs1  -Force -ErrorAction SilentlyContinue
-Remove-Item $sysStage -Recurse -Force -ErrorAction SilentlyContinue
-
-if (-not (Test-Path $doneFlag)) {
-    Write-Host " ERRORE: timeout copia file" -ForegroundColor Red
-    exit 1
-}
-$rcExit = [int]((Get-Content $doneFlag -Raw -ErrorAction SilentlyContinue) -replace '\D','0')
-Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
-if ($rcExit -ge 8) {
-    Write-Host " ERRORE (robocopy exit $rcExit)" -ForegroundColor Red
-    exit 1
-}
+Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
 
 # Ripristina file preservati
 foreach ($f in $preserved.Keys) {
