@@ -664,43 +664,67 @@ def update_apply():
             extract_dir
         )
 
-        # 4. Genera uno script PowerShell che ferma il servizio, copia i file e lo riavvia.
-        #    Cosi' la copia avviene DOPO che il servizio si e' fermato (nessun file bloccato).
+        # 4. Genera script PowerShell: ferma servizio, copia file, riavvia.
         install_root = os.path.normpath(os.path.join(BASE_DIR, ".."))
-        preserve_str = " ".join(f"'{p}'" for p in PRESERVE_ON_UPDATE)
+        version_file = os.path.normpath(VERSION_FILE)
+        # NOTA: virgole obbligatorie nell'array PowerShell
+        preserve_str = ", ".join(f"'{p}'" for p in PRESERVE_ON_UPDATE)
+        log_path     = os.path.join(install_root, "logs", "update.log")
         ps_script = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
-Start-Sleep 3
+function Log($m) {{ Add-Content '{log_path}' "$(Get-Date -f 'HH:mm:ss') $m" }}
+Log "=== Update avviato -> v{new_ver} ==="
+
+Start-Sleep 5
 Stop-Service '{SERVICE_NAME}' -Force
-Start-Sleep 3
+Log "Servizio fermato"
+Start-Sleep 5
 
 $inner    = '{inner}'
 $destRoot = '{install_root}'
 $preserve = @({preserve_str})
+$n = 0
 
 Get-ChildItem -Path $inner -Recurse -File | ForEach-Object {{
-    if ($preserve -contains $_.Name) {{ return }}
+    if ($preserve -contains $_.Name) {{ Log "SKIP: $($_.Name)"; return }}
     $rel  = $_.FullName.Substring($inner.Length).TrimStart('\\')
     $dest = Join-Path $destRoot $rel
     $dir  = Split-Path $dest -Parent
     if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Force $dir | Out-Null }}
     Copy-Item $_.FullName $dest -Force
+    $n++
 }}
+Log "Copiati $n file"
 
-[System.IO.File]::WriteAllText('{VERSION_FILE}', '{new_ver}')
+[System.IO.File]::WriteAllText('{version_file}', '{new_ver}')
+Log "version.txt aggiornato"
+
 Start-Service '{SERVICE_NAME}'
+Log "=== Update completato ==="
+
+Unregister-ScheduledTask -TaskName 'PcMonitorUpdate' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item '{tmp_dir}' -Recurse -Force -ErrorAction SilentlyContinue
 """
         ps_path = os.path.join(tmp_dir, "do_update.ps1")
         with open(ps_path, "w", encoding="utf-8") as f:
             f.write(ps_script)
 
-        # 5. Lancia lo script come processo completamente separato e rispondi subito
-        subprocess.Popen(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_path],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
+        # 5. Registra un Scheduled Task come SYSTEM e avvialo subito.
+        #    Cosi' lo script sopravvive allo stop del servizio (NSSM non puo' killarlo).
+        from datetime import datetime, timedelta
+        run_at   = (datetime.now() + timedelta(minutes=5)).strftime("%H:%M")
+        task_cmd = f'powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "{ps_path}"'
+        subprocess.run(["schtasks", "/delete", "/tn", "PcMonitorUpdate", "/f"],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(["schtasks", "/create",
+                        "/tn", "PcMonitorUpdate",
+                        "/tr", task_cmd,
+                        "/sc", "ONCE", "/st", run_at,
+                        "/ru", "SYSTEM", "/f", "/rl", "HIGHEST"],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.run(["schtasks", "/run", "/tn", "PcMonitorUpdate"],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
         return jsonify({"ok": True, "version": new_ver})
 
     except Exception as e:
