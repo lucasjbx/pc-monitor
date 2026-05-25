@@ -92,6 +92,7 @@ New-Item -ItemType Directory -Force $InstallDir | Out-Null
 # Necessario perche $SourceDir e' in AppData\Local\Temp dell'utente, inaccessibile a SYSTEM
 $sysStage = "C:\Windows\Temp\pcmonitor_stage"
 Remove-Item $sysStage -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $sysStage | Out-Null
 Copy-Item -Path "$SourceDir\*" -Destination $sysStage -Recurse -Force
 
 # Stadio B: SYSTEM copia da Windows\Temp a C:\PcMonitor (bypassa permessi bloccati)
