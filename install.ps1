@@ -88,14 +88,18 @@ foreach ($f in $preserveFiles) {
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 
-# Copia file come SYSTEM tramite Scheduled Task.
-# SYSTEM ha accesso completo anche a file con permessi bloccati da installazioni precedenti.
-$doneFlag = "$env:TEMP\pcmonitor_copy_done.txt"
-Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
+# Stadio A: copia i sorgenti in C:\Windows\Temp (accessibile da SYSTEM)
+# Necessario perche $SourceDir e' in AppData\Local\Temp dell'utente, inaccessibile a SYSTEM
+$sysStage = "C:\Windows\Temp\pcmonitor_stage"
+Remove-Item $sysStage -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item -Path "$SourceDir\*" -Destination $sysStage -Recurse -Force
 
-$copyPs1 = "$env:TEMP\pcmonitor_copy.ps1"
+# Stadio B: SYSTEM copia da Windows\Temp a C:\PcMonitor (bypassa permessi bloccati)
+$doneFlag = "C:\Windows\Temp\pcmonitor_copy_done.txt"
+$copyPs1  = "C:\Windows\Temp\pcmonitor_copy.ps1"
+Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
 [System.IO.File]::WriteAllText($copyPs1, @"
-`$rc = (robocopy '$SourceDir' '$InstallDir' /E /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS)
+robocopy '$sysStage' '$InstallDir' /E /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS
 `$LASTEXITCODE | Out-File '$doneFlag' -Encoding ASCII
 "@)
 
@@ -104,17 +108,17 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit
 Register-ScheduledTask -TaskName "PcMonitorCopy" -Action $action -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
 Start-ScheduledTask -TaskName "PcMonitorCopy"
 
-# Attendi completamento (max 60s)
 $deadline = (Get-Date).AddSeconds(60)
 while (-not (Test-Path $doneFlag) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
 Unregister-ScheduledTask -TaskName "PcMonitorCopy" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-Remove-Item $copyPs1 -Force -ErrorAction SilentlyContinue
+Remove-Item $copyPs1  -Force -ErrorAction SilentlyContinue
+Remove-Item $sysStage -Recurse -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path $doneFlag)) {
     Write-Host " ERRORE: timeout copia file" -ForegroundColor Red
     exit 1
 }
-$rcExit = [int]((Get-Content $doneFlag -ErrorAction SilentlyContinue) -replace '\D','')
+$rcExit = [int]((Get-Content $doneFlag -Raw -ErrorAction SilentlyContinue) -replace '\D','0')
 Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
 if ($rcExit -ge 8) {
     Write-Host " ERRORE (robocopy exit $rcExit)" -ForegroundColor Red
