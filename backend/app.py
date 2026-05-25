@@ -577,7 +577,7 @@ def upload_floorplan():
 def get_positions():
     """Legge le posizioni salvate dei PC sulla piantina"""
     if os.path.exists(POSITIONS_FILE):
-        with open(POSITIONS_FILE, encoding="utf-8") as f:
+        with open(POSITIONS_FILE, encoding="utf-8-sig") as f:  # utf-8-sig rimuove BOM se presente
             return jsonify(json_lib.load(f))
     return jsonify({})
 

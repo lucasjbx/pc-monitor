@@ -79,14 +79,21 @@ Stop-Process -Name python -Force -ErrorAction SilentlyContinue
 Stop-Process -Name nssm   -Force -ErrorAction SilentlyContinue
 Start-Sleep 2
 
-# Preserva config.json e positions.json se esistono gia
-$preserveFiles = @("backend\config.json", "backend\positions.json", "piantina.png")
-$preserved = @{}
-foreach ($f in $preserveFiles) {
-    $fullPath = Join-Path $InstallDir $f
-    if (Test-Path $fullPath) {
-        $preserved[$f] = Get-Content $fullPath -Raw
-    }
+# Preserva config.json e positions.json (testo) e piantina.png (binario) se esistono gia.
+# ATTENZIONE: Get-Content / Set-Content in PS 5.1 aggiunge BOM ai testi e corrompe i binari.
+# Si usa quindi [System.IO.File] con encoding esplicito UTF-8 senza BOM per i testi,
+# e ReadAllBytes / WriteAllBytes per i file binari.
+$preserveText   = @("backend\config.json", "backend\positions.json")
+$preserveBinary = @("piantina.png")
+$savedText      = @{}
+$savedBinary    = @{}
+foreach ($f in $preserveText) {
+    $fp = Join-Path $InstallDir $f
+    if (Test-Path $fp) { $savedText[$f] = [System.IO.File]::ReadAllText($fp) }
+}
+foreach ($f in $preserveBinary) {
+    $fp = Join-Path $InstallDir $f
+    if (Test-Path $fp) { $savedBinary[$f] = [System.IO.File]::ReadAllBytes($fp) }
 }
 
 # Rinomina la vecchia directory invece di sovrascriverla.
@@ -107,10 +114,15 @@ if (Test-Path "${InstallDir}_old") {
               -ArgumentList "${InstallDir}_old" | Out-Null
 }
 
-# Ripristina file preservati
-foreach ($f in $preserved.Keys) {
-    $fullPath = Join-Path $InstallDir $f
-    Set-Content $fullPath $preserved[$f] -Encoding UTF8
+# Ripristina file preservati (senza BOM per i testi, byte-per-byte per i binari)
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+foreach ($f in $savedText.Keys) {
+    $fp = Join-Path $InstallDir $f
+    [System.IO.File]::WriteAllText($fp, $savedText[$f], $utf8NoBom)
+}
+foreach ($f in $savedBinary.Keys) {
+    $fp = Join-Path $InstallDir $f
+    [System.IO.File]::WriteAllBytes($fp, $savedBinary[$f])
 }
 
 New-Item -ItemType Directory -Force "$InstallDir\logs" | Out-Null
