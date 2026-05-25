@@ -58,18 +58,21 @@ Write-Host " OK ($pyVer)" -ForegroundColor Green
 # -- 2. Copia file ------------------------------------------------------------
 Write-Host "[2/6] Copia file in $InstallDir..." -NoNewline
 
-# Ferma servizio e termina processi residui che potrebbero bloccare i file
+# Ferma e RIMUOVE il servizio prima di toccare i file
 $existing = Get-Service $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
-    Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+    Set-Service  $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue  # Blocca auto-restart
+    Stop-Service $ServiceName -Force    -ErrorAction SilentlyContinue
     Start-Sleep 2
     $nssmExe = "$InstallDir\tools\nssm.exe"
     if (Test-Path $nssmExe) {
         $ErrorActionPreference = "SilentlyContinue"
         & $nssmExe remove $ServiceName confirm 2>$null
         $ErrorActionPreference = "Stop"
-        Start-Sleep 1
+    } else {
+        sc.exe delete $ServiceName 2>$null | Out-Null  # Fallback se nssm.exe non esiste
     }
+    Start-Sleep 2
 }
 # Termina qualsiasi processo Python o NSSM rimasto attivo
 Stop-Process -Name python -Force -ErrorAction SilentlyContinue
