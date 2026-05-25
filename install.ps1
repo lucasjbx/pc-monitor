@@ -86,17 +86,14 @@ foreach ($f in $preserveFiles) {
     }
 }
 
-# Rimuovi vecchia installazione: reset permessi + elimina con cmd
-if (Test-Path $InstallDir) {
-    takeown /F "$InstallDir" /R /A /D Y 2>$null | Out-Null
-    icacls "$InstallDir" /reset /T /Q 2>$null | Out-Null
-    icacls "$InstallDir" /grant "Administrators:(OI)(CI)F" /T /Q 2>$null | Out-Null
-    attrib -R -S -H "$InstallDir\*" /S /D 2>$null | Out-Null
-    cmd /c rd /s /q "$InstallDir" 2>$null
-    Start-Sleep 1
-}
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
+# robocopy /B (Backup mode) bypassa i permessi — piu robusto di Copy-Item
+# Exit code < 8 = successo (0=nulla copiato, 1=ok, 2=extra, 4=mismatch, 7=combo)
+robocopy "$SourceDir" "$InstallDir" /E /B /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
+if ($LASTEXITCODE -ge 8) {
+    Write-Host " ERRORE (robocopy exit $LASTEXITCODE)" -ForegroundColor Red
+    exit 1
+}
 
 # Ripristina file preservati
 foreach ($f in $preserved.Keys) {
