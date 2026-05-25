@@ -87,11 +87,37 @@ foreach ($f in $preserveFiles) {
 }
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-# robocopy /B (Backup mode) bypassa i permessi — piu robusto di Copy-Item
-# Exit code < 8 = successo (0=nulla copiato, 1=ok, 2=extra, 4=mismatch, 7=combo)
-robocopy "$SourceDir" "$InstallDir" /E /B /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS | Out-Null
-if ($LASTEXITCODE -ge 8) {
-    Write-Host " ERRORE (robocopy exit $LASTEXITCODE)" -ForegroundColor Red
+
+# Copia file come SYSTEM tramite Scheduled Task.
+# SYSTEM ha accesso completo anche a file con permessi bloccati da installazioni precedenti.
+$doneFlag = "$env:TEMP\pcmonitor_copy_done.txt"
+Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
+
+$copyPs1 = "$env:TEMP\pcmonitor_copy.ps1"
+[System.IO.File]::WriteAllText($copyPs1, @"
+`$rc = (robocopy '$SourceDir' '$InstallDir' /E /IS /IT /IM /R:1 /W:1 /NFL /NDL /NJH /NJS)
+`$LASTEXITCODE | Out-File '$doneFlag' -Encoding ASCII
+"@)
+
+$action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NonInteractive -File `"$copyPs1`""
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
+Register-ScheduledTask -TaskName "PcMonitorCopy" -Action $action -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
+Start-ScheduledTask -TaskName "PcMonitorCopy"
+
+# Attendi completamento (max 60s)
+$deadline = (Get-Date).AddSeconds(60)
+while (-not (Test-Path $doneFlag) -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+Unregister-ScheduledTask -TaskName "PcMonitorCopy" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+Remove-Item $copyPs1 -Force -ErrorAction SilentlyContinue
+
+if (-not (Test-Path $doneFlag)) {
+    Write-Host " ERRORE: timeout copia file" -ForegroundColor Red
+    exit 1
+}
+$rcExit = [int]((Get-Content $doneFlag -ErrorAction SilentlyContinue) -replace '\D','')
+Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
+if ($rcExit -ge 8) {
+    Write-Host " ERRORE (robocopy exit $rcExit)" -ForegroundColor Red
     exit 1
 }
 
