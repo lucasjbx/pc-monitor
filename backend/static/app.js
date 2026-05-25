@@ -23,6 +23,12 @@ let panX = 0;
 let panY = 0;
 let _pan = null;   // { startX, startY, startPanX, startPanY }
 
+// Stato pannello PC list
+let selectedPCs   = new Set();
+let listCollapsed = localStorage.getItem('pcListCollapsed') === '1';
+let listSortKey   = localStorage.getItem('pcListSort')    || 'hostname';
+let listSortDir   = localStorage.getItem('pcListSortDir') || 'asc';
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   // Header
@@ -135,6 +141,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Pannello PC list
+  document.getElementById('pc-list-toggle').addEventListener('click', togglePcListPanel);
+  document.getElementById('chk-select-all').addEventListener('change', e => selectAllPcs(e.target.checked));
+  document.getElementById('pc-list-sort-key').addEventListener('change', e => {
+    listSortKey = e.target.value;
+    localStorage.setItem('pcListSort', listSortKey);
+    renderPcList();
+  });
+  document.getElementById('pc-list-sort-dir').addEventListener('click', () => {
+    listSortDir = listSortDir === 'asc' ? 'desc' : 'asc';
+    localStorage.setItem('pcListSortDir', listSortDir);
+    document.getElementById('pc-list-sort-dir').textContent = listSortDir === 'asc' ? '↑' : '↓';
+    renderPcList();
+  });
+  document.getElementById('btn-bulk-wol').addEventListener('click', bulkWol);
+  document.getElementById('btn-bulk-shutdown').addEventListener('click', bulkShutdown);
+
+  // Applica stato iniziale
+  document.getElementById('pc-list-sort-key').value = listSortKey;
+  document.getElementById('pc-list-sort-dir').textContent = listSortDir === 'asc' ? '↑' : '↓';
+  if (listCollapsed) {
+    document.getElementById('pc-list-panel').classList.add('collapsed');
+    document.getElementById('pc-list-toggle').textContent = '❯';
+  }
+
   await loadSedeName();
   await loadPositions();
   await loadPcs();
@@ -230,7 +261,7 @@ function renderMarkers() {
     container.appendChild(el);
   }
 
-  renderUnpositioned();
+  renderPcList();
 }
 
 // ── Pannello PC ───────────────────────────────────────────────────────────────
@@ -863,35 +894,150 @@ function resetZoom() {
   applyTransform();
 }
 
-// ── PC non posizionati ────────────────────────────────────────────────────────
-function renderUnpositioned() {
-  const section = document.getElementById('unpositioned-section');
-  if (!section) return;
+// ── Pannello PC list ──────────────────────────────────────────────────────────
+function sortPcList(arr) {
+  const key = listSortKey;
+  const dir = listSortDir === 'asc' ? 1 : -1;
+  return [...arr].sort((a, b) => {
+    if (key === 'ip') {
+      const toNum = ip => {
+        if (!ip) return Infinity;
+        return ip.split('.').reduce((acc, o) => acc * 256 + parseInt(o, 10), 0);
+      };
+      const va = toNum(a.ip), vb = toNum(b.ip);
+      if (va === Infinity && vb === Infinity) return 0;
+      if (va === Infinity) return 1;
+      if (vb === Infinity) return -1;
+      return (va - vb) * dir;
+    }
+    const fieldMap = { hostname: 'hostname', user: 'user', fullname: 'fullname', os: 'os', model: 'model' };
+    const field = fieldMap[key] || 'hostname';
+    const va = (a[field] || '').toLowerCase();
+    const vb = (b[field] || '').toLowerCase();
+    if (!va && !vb) return 0;
+    if (!va) return 1;
+    if (!vb) return -1;
+    return va < vb ? -dir : va > vb ? dir : 0;
+  });
+}
 
-  const unposPcs = pcs.filter(p => !positions[p.hostname]);
+function renderPcList() {
+  const items   = document.getElementById('pc-list-items');
+  const countEl = document.getElementById('pc-list-count');
+  if (!items) return;
 
-  section.classList.toggle('hidden', unposPcs.length === 0);
+  const sorted = sortPcList(pcs);
+  countEl.textContent = sorted.length;
 
-  const countEl = document.getElementById('unpositioned-count');
-  if (countEl) countEl.textContent = unposPcs.length;
-
-  const list = document.getElementById('unpositioned-list');
-  list.innerHTML = unposPcs.map(pc => {
-    const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
-    return `<div class="unpos-card" data-hostname="${escHtml(pc.hostname)}">
-      <span class="unpos-dot ${cls}"></span>
-      <div class="unpos-info">
-        <span class="unpos-hostname">${escHtml(pc.hostname)}</span>
-        ${pc.user ? `<span class="unpos-user">${escHtml(pc.user)}</span>` : ''}
+  items.innerHTML = sorted.map(pc => {
+    const cls     = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const checked = selectedPCs.has(pc.hostname) ? 'checked' : '';
+    const selCls  = selectedPCs.has(pc.hostname) ? ' selected' : '';
+    return `<div class="pc-list-item${selCls}" data-hostname="${escHtml(pc.hostname)}">
+      <input type="checkbox" ${checked} data-chk="${escHtml(pc.hostname)}">
+      <span class="pc-list-dot ${cls}"></span>
+      <div class="pc-list-info">
+        <div class="pc-list-name">${escHtml(pc.hostname)}</div>
+        ${pc.user ? `<div class="pc-list-user">${escHtml(pc.user)}</div>` : ''}
       </div>
     </div>`;
   }).join('');
 
-  list.querySelectorAll('.unpos-card').forEach(card => {
-    const hostname = card.dataset.hostname;
-    const pc = pcs.find(p => p.hostname === hostname);
-    if (pc) card.addEventListener('click', () => openPanel(pc));
+  items.querySelectorAll('.pc-list-item').forEach(el => {
+    const hostname = el.dataset.hostname;
+    const chk      = el.querySelector('input[type=checkbox]');
+    chk.addEventListener('change', e => {
+      e.stopPropagation();
+      togglePcSelection(hostname, e.target.checked);
+    });
+    el.addEventListener('click', e => {
+      if (e.target.type === 'checkbox') return;
+      const pc = pcs.find(p => p.hostname === hostname);
+      if (pc) openPanel(pc);
+    });
   });
+
+  // Aggiorna select-all checkbox
+  const chkAll = document.getElementById('chk-select-all');
+  if (chkAll) {
+    chkAll.checked       = pcs.length > 0 && selectedPCs.size === pcs.length;
+    chkAll.indeterminate = selectedPCs.size > 0 && selectedPCs.size < pcs.length;
+  }
+  updateBulkBar();
+}
+
+function togglePcSelection(hostname, checked) {
+  if (checked) selectedPCs.add(hostname);
+  else         selectedPCs.delete(hostname);
+  // Aggiorna solo l'item senza re-render completo
+  const item = items => items && items.querySelector(`.pc-list-item[data-hostname="${CSS.escape(hostname)}"]`);
+  const el   = item(document.getElementById('pc-list-items'));
+  if (el) el.classList.toggle('selected', checked);
+  const chkAll = document.getElementById('chk-select-all');
+  if (chkAll) {
+    chkAll.checked       = pcs.length > 0 && selectedPCs.size === pcs.length;
+    chkAll.indeterminate = selectedPCs.size > 0 && selectedPCs.size < pcs.length;
+  }
+  updateBulkBar();
+}
+
+function selectAllPcs(checked) {
+  if (checked) pcs.forEach(pc => selectedPCs.add(pc.hostname));
+  else         selectedPCs.clear();
+  renderPcList();
+}
+
+function updateBulkBar() {
+  const bar    = document.getElementById('bulk-bar');
+  const btnWol = document.getElementById('btn-bulk-wol');
+  const btnSd  = document.getElementById('btn-bulk-shutdown');
+  const cntWol = document.getElementById('bulk-wol-count');
+  const cntSd  = document.getElementById('bulk-sd-count');
+  if (!bar) return;
+
+  if (selectedPCs.size === 0) { bar.classList.add('hidden'); return; }
+
+  const offlineSelected = [...selectedPCs].filter(h => {
+    const pc = pcs.find(p => p.hostname === h);
+    return pc && !pc.online && pc.mac;
+  });
+  const onlineSelected = [...selectedPCs].filter(h => {
+    const pc = pcs.find(p => p.hostname === h);
+    return pc && pc.online && pc.ip;
+  });
+
+  bar.classList.remove('hidden');
+  cntWol.textContent = offlineSelected.length;
+  cntSd.textContent  = onlineSelected.length;
+  btnWol.disabled    = offlineSelected.length === 0;
+  btnSd.disabled     = onlineSelected.length  === 0;
+}
+
+async function bulkWol() {
+  const targets = [...selectedPCs].filter(h => {
+    const pc = pcs.find(p => p.hostname === h);
+    return pc && !pc.online && pc.mac;
+  });
+  for (const h of targets) await doWol(h);
+}
+
+async function bulkShutdown() {
+  const targets = [...selectedPCs].filter(h => {
+    const pc = pcs.find(p => p.hostname === h);
+    return pc && pc.online && pc.ip;
+  });
+  if (targets.length === 0) return;
+  if (!confirm(`Spegnere ${targets.length} PC? Alcuni potrebbero avere utenti loggati.`)) return;
+  for (const h of targets) await doShutdown(h);
+}
+
+function togglePcListPanel() {
+  const panel  = document.getElementById('pc-list-panel');
+  const toggle = document.getElementById('pc-list-toggle');
+  listCollapsed = !listCollapsed;
+  panel.classList.toggle('collapsed', listCollapsed);
+  toggle.textContent = listCollapsed ? '❯' : '❮';
+  localStorage.setItem('pcListCollapsed', listCollapsed ? '1' : '0');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

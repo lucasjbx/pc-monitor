@@ -83,13 +83,34 @@
         </div>
       </div>
 
-      <!-- Sidebar PC non posizionati -->
-      <div id="unpositioned-section" class="unpositioned-sidebar hidden">
-        <div class="unpositioned-header-bar">
-          <span>Non sulla mappa</span>
-          <span id="unpositioned-count" class="editor-count">0</span>
+      <!-- Pannello laterale tutti i PC -->
+      <div id="pc-list-panel" class="pc-list-panel">
+        <button id="pc-list-toggle" class="pc-list-toggle" title="Mostra/nascondi">❮</button>
+        <div class="pc-list-inner">
+          <div class="pc-list-header">
+            <label class="pc-list-selectall">
+              <input type="checkbox" id="chk-select-all">
+              <span>Tutti i PC</span>
+            </label>
+            <span id="pc-list-count" class="pc-list-count">0</span>
+          </div>
+          <div class="pc-list-sort-bar">
+            <select id="pc-list-sort-key">
+              <option value="hostname">Hostname</option>
+              <option value="ip">IP</option>
+              <option value="user">Utente AD</option>
+              <option value="fullname">Nome reale</option>
+              <option value="os">OS</option>
+              <option value="model">Modello PC</option>
+            </select>
+            <button id="pc-list-sort-dir" title="Inverti ordine">↑</button>
+          </div>
+          <div id="pc-list-items" class="pc-list-items"></div>
+          <div id="bulk-bar" class="bulk-bar hidden">
+            <button id="btn-bulk-wol" class="btn-bulk btn-bulk-wol">⚡ Accendi (<span id="bulk-wol-count">0</span>)</button>
+            <button id="btn-bulk-shutdown" class="btn-bulk btn-bulk-sd">⏻ Spegni (<span id="bulk-sd-count">0</span>)</button>
+          </div>
         </div>
-        <div id="unpositioned-list" class="unpositioned-list"></div>
       </div>
     </div>
   </main>
