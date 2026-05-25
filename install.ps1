@@ -86,22 +86,23 @@ foreach ($f in $preserveFiles) {
     }
 }
 
-# Se la directory esiste, SYSTEM la cancella (SYSTEM e' owner dei file creati dal servizio)
+# Rinomina la vecchia directory invece di sovrascriverla.
+# Rename richiede solo accesso al parent (C:\), non ai file dentro —
+# nessun problema di permessi anche se i file sono di SYSTEM.
 if (Test-Path $InstallDir) {
-    $cleanBat = "C:\Windows\Temp\pcmonitor_clean.bat"
-    $doneFlag = "C:\Windows\Temp\pcmonitor_clean_done.txt"
-    Remove-Item $doneFlag -Force -ErrorAction SilentlyContinue
-    "@echo off`r`nrd /s /q `"$InstallDir`"`r`necho done > `"$doneFlag`"" | Set-Content $cleanBat -Encoding ASCII
-    schtasks /create /f /tn "PcMonitorClean" /tr "`"$cleanBat`"" /sc once /st 00:00 /ru SYSTEM | Out-Null
-    schtasks /run /tn "PcMonitorClean" | Out-Null
-    $deadline = (Get-Date).AddSeconds(20)
-    while (-not (Test-Path $doneFlag) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
-    schtasks /delete /f /tn "PcMonitorClean" | Out-Null
-    Remove-Item $cleanBat, $doneFlag -Force -ErrorAction SilentlyContinue
+    $backup = "${InstallDir}_old"
+    Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue
+    Rename-Item $InstallDir $backup -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 Copy-Item -Path "$SourceDir\*" -Destination $InstallDir -Recurse -Force
+
+# Elimina il backup in background (potrebbe fallire se file ancora aperti, non critico)
+if (Test-Path "${InstallDir}_old") {
+    Start-Job -ScriptBlock { param($p) Start-Sleep 5; Remove-Item $p -Recurse -Force -EA SilentlyContinue } `
+              -ArgumentList "${InstallDir}_old" | Out-Null
+}
 
 # Ripristina file preservati
 foreach ($f in $preserved.Keys) {
