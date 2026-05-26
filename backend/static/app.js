@@ -663,15 +663,9 @@ function handleEditorListMousedown(e) {
 function updateEditorInstruction() {
   const el  = document.getElementById('editor-instruction');
   const img = document.getElementById('editor-img');
-  img.classList.remove('crosshair');   // il crosshair non è più usato con drag-and-drop
-  if (editorSelected) {
-    el.textContent = `Trascina ${editorSelected} sulla mappa, oppure clicca sulla mappa per posizionarlo`;
-    el.className   = 'editor-instruction active';
-    img.classList.add('crosshair');    // permette ancora click-to-place come fallback
-  } else {
-    el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
-    el.className   = 'editor-instruction';
-  }
+  img.classList.remove('crosshair');
+  el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
+  el.className   = 'editor-instruction';
 }
 
 function renderEditorSidebar() {
