@@ -169,8 +169,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (_drag) {
       const img  = document.getElementById('editor-img');
       const rect = img.getBoundingClientRect();
-      const x    = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      const y    = Math.max(0, Math.min(1, (e.clientY - rect.top)  / rect.height));
+      const cx   = (e.clientX - rect.left) / rect.width;
+      const cy   = (e.clientY - rect.top)  / rect.height;
+      const x    = Math.max(0, Math.min(1, cx - _drag.offsetX));
+      const y    = Math.max(0, Math.min(1, cy - _drag.offsetY));
       _drag.el.style.left = `${x * 100}%`;
       _drag.el.style.top  = `${y * 100}%`;
       editorPos[_drag.hostname] = { x, y };
@@ -732,12 +734,16 @@ function renderEditorMarkers() {
       updateEditorInstruction();
     });
 
-    // Drag start
+    // Drag start — salva offset cursore/centro per evitare "salto"
     el.addEventListener('mousedown', e => {
       if (e.target.closest('.editor-marker-remove')) return;
       e.preventDefault();
       e.stopPropagation();
-      _drag = { hostname, el };
+      const img  = document.getElementById('editor-img');
+      const rect = img.getBoundingClientRect();
+      const cx   = (e.clientX - rect.left) / rect.width;
+      const cy   = (e.clientY - rect.top)  / rect.height;
+      _drag = { hostname, el, offsetX: cx - pos.x, offsetY: cy - pos.y };
       editorSelected = hostname;
       el.classList.add('dragging');
       renderEditorSidebar();
