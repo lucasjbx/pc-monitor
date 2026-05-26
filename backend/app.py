@@ -44,28 +44,38 @@ SECRET_AUTH_TOKEN = "AuthToken"
 def get_secret(name: str) -> str:
     """
     Legge un segreto dalla chiave Registry HKLM\\SOFTWARE\\PcMonitor\\Secrets.
-    La chiave è protetta SYSTEM-only; in ambienti non-Windows o senza accesso ritorna ''.
+    Fallback a config.json se il Registry non è disponibile o il valore è vuoto
+    (garantisce retrocompatibilità e gestisce il caso in cui install.ps1 non è
+    ancora stato eseguito dopo un aggiornamento via UI).
     """
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH, 0, winreg.KEY_READ)
         val, _ = winreg.QueryValueEx(key, name)
         winreg.CloseKey(key)
-        return val or ""
+        if val:
+            return val
     except Exception:
-        return ""
+        pass
+    # Fallback: legge da config.json (install non ancora eseguito, o ambienti non-Windows)
+    _fallback = {SECRET_WMI_PASS: ("wmi", "pass"), SECRET_AUTH_TOKEN: ("auth", "token")}
+    if name in _fallback:
+        section, key_name = _fallback[name]
+        return get_cfg().get(section, {}).get(key_name, "")
+    return ""
 
 
-def set_secret(name: str, value: str) -> None:
+def set_secret(name: str, value: str) -> bool:
     """
     Scrive o cancella un segreto nella chiave Registry.
-    Richiede SYSTEM o un account con FullControl sulla chiave.
-    Silenzioso se la chiave non esiste o i permessi mancano (non-Windows, ambienti dev).
+    Crea la chiave se non esiste (CreateKeyEx).
+    Ritorna True se l'operazione è riuscita, False altrimenti.
     """
     try:
         import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH,
-                             0, winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
+        # CreateKeyEx crea la chiave se non esiste (a differenza di OpenKey)
+        key, _ = winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH,
+                                    0, winreg.KEY_SET_VALUE)
         if value:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
         else:
@@ -74,8 +84,9 @@ def set_secret(name: str, value: str) -> None:
             except OSError:
                 pass
         winreg.CloseKey(key)
+        return True
     except Exception:
-        pass   # silenzioso: non-Windows o accesso negato
+        return False   # non-Windows, accesso negato o Registry non disponibile
 
 
 # ── Autenticazione ────────────────────────────────────────────────────────────
@@ -181,17 +192,20 @@ def _migrate_secrets_to_registry():
     """
     Migrazione una-tantum: se config.json contiene ancora wmi.pass o auth.token in chiaro,
     li sposta nel Registry e li azzera nel file.  Eseguita ad ogni avvio ma è idempotente.
+    IMPORTANTE: azzera il valore nel file SOLO se la scrittura nel Registry è riuscita,
+    altrimenti il segreto rimane in config.json come fallback finché install.ps1 non viene
+    eseguito (es. aggiornamento via UI senza bootstrap).
     """
     cfg     = get_cfg()
     changed = False
     if cfg.get("wmi", {}).get("pass"):
-        set_secret(SECRET_WMI_PASS, cfg["wmi"]["pass"])
-        cfg["wmi"]["pass"] = ""
-        changed = True
+        if set_secret(SECRET_WMI_PASS, cfg["wmi"]["pass"]):
+            cfg["wmi"]["pass"] = ""
+            changed = True
     if cfg.get("auth", {}).get("token"):
-        set_secret(SECRET_AUTH_TOKEN, cfg["auth"]["token"])
-        cfg["auth"]["token"] = ""
-        changed = True
+        if set_secret(SECRET_AUTH_TOKEN, cfg["auth"]["token"]):
+            cfg["auth"]["token"] = ""
+            changed = True
     if changed:
         save_config(cfg)
         apply_config(cfg)
