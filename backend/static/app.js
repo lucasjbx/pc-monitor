@@ -607,6 +607,10 @@ function refreshPanelIfOpen(hostname) {
 function openEditor() {
   editorPos      = { ...positions };
   editorSelected = null;
+  // Resetta stato del bottone salva (potrebbe essere rimasto disabled dal salvataggio precedente)
+  const saveBtn = document.getElementById('btn-save-positions');
+  saveBtn.disabled    = false;
+  saveBtn.textContent = 'Salva';
   renderEditorSidebar();
   renderEditorMarkers();
   updateEditorInstruction();
