@@ -11,7 +11,8 @@ let fetching        = false;
 // Stato editor
 let editorPos       = {};
 let editorSelected  = null;
-let _drag           = null;   // { hostname, el } durante il trascinamento
+let _drag           = null;   // { hostname, el } durante il trascinamento di un marker sulla mappa
+let _sidebarDrag    = null;   // { hostname, ghostEl, startX, startY, moved } durante drag dalla lista
 
 // Stato impostazioni
 let settingsConfig  = {};          // copia locale della config durante editing
@@ -140,10 +141,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-save-positions').addEventListener('click', savePositions);
   document.getElementById('editor-img').addEventListener('click', handleEditorClick);
   document.getElementById('editor-pc-list').addEventListener('click', handleEditorListClick);
+  document.getElementById('editor-pc-list').addEventListener('mousedown', handleEditorListMousedown);
 
   // Drag editor + pan mappa — mousemove/mouseup globali
   document.addEventListener('mousemove', e => {
-    if (_drag) {
+    if (_sidebarDrag) {
+      // Drag dalla lista sidebar: mostra ghost dopo 5px di movimento
+      const dx = e.clientX - _sidebarDrag.startX;
+      const dy = e.clientY - _sidebarDrag.startY;
+      if (!_sidebarDrag.moved && Math.hypot(dx, dy) > 5) {
+        _sidebarDrag.moved = true;
+        const ghost = document.createElement('div');
+        ghost.className   = 'editor-drag-ghost';
+        ghost.textContent = _sidebarDrag.hostname;
+        document.body.appendChild(ghost);
+        _sidebarDrag.ghostEl = ghost;
+      }
+      if (_sidebarDrag.ghostEl) {
+        _sidebarDrag.ghostEl.style.left = `${e.clientX}px`;
+        _sidebarDrag.ghostEl.style.top  = `${e.clientY}px`;
+        const img  = document.getElementById('editor-img');
+        const rect = img.getBoundingClientRect();
+        const over = e.clientX >= rect.left && e.clientX <= rect.right &&
+                     e.clientY >= rect.top  && e.clientY <= rect.bottom;
+        img.classList.toggle('drop-target', over);
+      }
+    } else if (_drag) {
       const img  = document.getElementById('editor-img');
       const rect = img.getBoundingClientRect();
       const x    = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -157,7 +180,35 @@ document.addEventListener('DOMContentLoaded', async () => {
       applyTransform();
     }
   });
-  document.addEventListener('mouseup', () => {
+  document.addEventListener('mouseup', e => {
+    if (_sidebarDrag) {
+      const img = document.getElementById('editor-img');
+      img.classList.remove('drop-target');
+      if (_sidebarDrag.ghostEl) {
+        // Rilascio dopo drag effettivo
+        _sidebarDrag.ghostEl.remove();
+        const rect = img.getBoundingClientRect();
+        const over = e.clientX >= rect.left && e.clientX <= rect.right &&
+                     e.clientY >= rect.top  && e.clientY <= rect.bottom;
+        if (over) {
+          const x = (e.clientX - rect.left) / rect.width;
+          const y = (e.clientY - rect.top)  / rect.height;
+          editorPos[_sidebarDrag.hostname] = { x, y };
+          editorSelected = null;
+          renderEditorSidebar();
+          renderEditorMarkers();
+          updateEditorInstruction();
+        }
+      } else {
+        // Nessun movimento → trattato come click: seleziona il PC
+        editorSelected = _sidebarDrag.hostname;
+        renderEditorSidebar();
+        renderEditorMarkers();
+        updateEditorInstruction();
+      }
+      _sidebarDrag = null;
+      return;
+    }
     if (_drag) {
       _drag.el.classList.remove('dragging');
       _drag = null;
@@ -583,6 +634,7 @@ function handleEditorClick(e) {
 }
 
 function handleEditorListClick(e) {
+  // La rimozione tramite il bottone × usa il click normale
   const removeBtn = e.target.closest('.editor-remove');
   if (removeBtn) {
     const h = removeBtn.dataset.hostname;
@@ -593,26 +645,32 @@ function handleEditorListClick(e) {
     updateEditorInstruction();
     return;
   }
+  // I click sugli item sono gestiti dal mouseup di _sidebarDrag (e.preventDefault nel mousedown
+  // previene questo evento per i non-removeBtn), quindi non fare nulla qui.
+}
+
+function handleEditorListMousedown(e) {
   const item = e.target.closest('.editor-pc-item');
-  if (item) {
-    editorSelected = item.dataset.hostname;
-    renderEditorSidebar();
-    renderEditorMarkers();
-    updateEditorInstruction();
-  }
+  if (!item) return;
+  // Lascia passare il click sul bottone rimozione
+  if (e.target.closest('.editor-remove')) return;
+  // Blocca selezione testo e l'evento click successivo; gestisce tutto in mouseup
+  e.preventDefault();
+  const hostname = item.dataset.hostname;
+  _sidebarDrag = { hostname, ghostEl: null, startX: e.clientX, startY: e.clientY, moved: false };
 }
 
 function updateEditorInstruction() {
   const el  = document.getElementById('editor-instruction');
   const img = document.getElementById('editor-img');
+  img.classList.remove('crosshair');   // il crosshair non è più usato con drag-and-drop
   if (editorSelected) {
-    el.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
+    el.textContent = `Trascina ${editorSelected} sulla mappa, oppure clicca sulla mappa per posizionarlo`;
     el.className   = 'editor-instruction active';
-    img.classList.add('crosshair');
+    img.classList.add('crosshair');    // permette ancora click-to-place come fallback
   } else {
-    el.textContent = 'Seleziona un PC dalla lista →';
+    el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
     el.className   = 'editor-instruction';
-    img.classList.remove('crosshair');
   }
 }
 

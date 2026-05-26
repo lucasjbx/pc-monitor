@@ -508,6 +508,29 @@ body {
 }
 .editor-remove:hover { color: #c0392b; background: rgba(192,57,43,.08); }
 
+/* Drag dalla lista: cursore grab sui PC non posizionati */
+.editor-pc-item:not(.placed) { cursor: grab; }
+.editor-pc-item:not(.placed):active { cursor: grabbing; }
+
+/* Ghost che segue il cursore durante il drag */
+.editor-drag-ghost {
+  position: fixed;
+  background: rgba(59,130,246,.92);
+  color: #fff;
+  font-size: 10px; font-weight: 700;
+  padding: 3px 10px; border-radius: 4px;
+  white-space: nowrap; pointer-events: none;
+  z-index: 9999; user-select: none;
+  box-shadow: 0 3px 14px rgba(0,0,0,.35);
+  transform: translate(-50%, -50%);
+}
+
+/* Evidenzia la mappa quando si trascina sopra */
+.editor-image-wrapper img.drop-target {
+  outline: 2px dashed #3b82f6;
+  outline-offset: -2px;
+}
+
 .editor-footer {
   padding: 12px; border-top: 1px solid #eee;
 }
