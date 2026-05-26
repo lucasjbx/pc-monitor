@@ -182,6 +182,14 @@
               <input class="settings-input" id="cfg-poll-interval" type="number" min="5" max="300" placeholder="10">
               <p class="settings-hint">Ogni quanti secondi viene eseguito il ping e la query WMI su tutti i PC.</p>
             </div>
+            <div class="settings-section">
+              <label class="settings-label">API Key (autenticazione)</label>
+              <div class="settings-password-wrap">
+                <input class="settings-input" id="cfg-auth-token" type="password" placeholder="Lascia vuoto per disabilitare">
+                <button class="settings-toggle-pass" id="btn-toggle-auth-token" title="Mostra/nascondi">👁</button>
+              </div>
+              <p class="settings-hint">Se impostata, tutte le richieste API richiedono questa chiave. Lasciare vuoto per accesso libero.</p>
+            </div>
           </div>
 
           <!-- Tab: Rete -->
@@ -303,6 +311,32 @@
 
     </div><!-- /editor-container -->
   </div><!-- /settings-overlay -->
+
+  <!-- Login overlay (autenticazione API key) -->
+  <div id="login-overlay" class="login-overlay hidden">
+    <div class="login-box">
+      <svg class="login-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+        <rect width="32" height="32" rx="6" fill="#111"/>
+        <rect x="3" y="5" width="26" height="17" rx="2.5" fill="none" stroke="#22c55e" stroke-width="2"/>
+        <polyline points="6,13 9,13 11,8 13.5,18 16,10 18,13 22,13 26,13"
+          fill="none" stroke="#22c55e" stroke-width="1.8"
+          stroke-linejoin="round" stroke-linecap="round"/>
+        <line x1="16" y1="22" x2="16" y2="26" stroke="#22c55e" stroke-width="2" stroke-linecap="round"/>
+        <line x1="11" y1="26" x2="21" y2="26" stroke="#22c55e" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <h2 class="login-title">Ciro Monitor</h2>
+      <p class="login-subtitle">Inserisci l'API key per accedere</p>
+      <div class="login-form">
+        <div class="settings-password-wrap">
+          <input type="password" id="login-token" class="settings-input login-input"
+                 placeholder="API key" autocomplete="current-password">
+          <button class="settings-toggle-pass" id="btn-toggle-login-pass" title="Mostra/nascondi">👁</button>
+        </div>
+        <button id="btn-login" class="btn-save login-btn">Accedi</button>
+        <p id="login-error" class="login-error hidden">Token non valido — riprova</p>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

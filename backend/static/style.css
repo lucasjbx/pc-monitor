@@ -656,3 +656,36 @@ body {
 .settings-file-input {
   display: block; margin-bottom: 8px; font-size: 13px;
 }
+
+/* ── Login overlay ─────────────────────────────────────────────────────────── */
+.login-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+}
+.login-box {
+  background: #fff; border-radius: 14px;
+  padding: 40px 36px; width: 340px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.22);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.login-icon {
+  width: 48px; height: 48px; border-radius: 10px;
+  margin-bottom: 6px;
+}
+.login-title {
+  font-size: 1.2rem; font-weight: 700; color: #111; margin: 0;
+}
+.login-subtitle {
+  font-size: .82rem; color: #888; margin-bottom: 10px; text-align: center;
+}
+.login-form {
+  width: 100%; display: flex; flex-direction: column; gap: 10px;
+}
+.login-input { font-size: .95rem; }
+.login-btn   { width: 100%; font-size: .95rem; padding: 10px; }
+.login-error {
+  color: #dc2626; font-size: .8rem; text-align: center;
+  background: #fef2f2; border-radius: 6px; padding: 6px 10px;
+}

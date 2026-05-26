@@ -16,6 +16,7 @@ import tempfile
 import urllib.request
 import zipfile
 from datetime import datetime, timezone, timedelta
+from functools import wraps
 from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
@@ -31,6 +32,24 @@ VERSION_FILE   = os.path.join(BASE_DIR, "..", "version.txt")
 GITHUB_REPO    = "lucasjbx/pc-monitor"
 SERVICE_NAME   = "PcMonitor"
 PRESERVE_ON_UPDATE = {"config.json", "positions.json"}
+
+
+# ── Autenticazione ────────────────────────────────────────────────────────────
+def require_auth(f):
+    """
+    Decorator — verifica X-Api-Key se auth.token è configurato in config.json.
+    Se il token è vuoto, l'endpoint è aperto senza autenticazione (retrocompatibile).
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = get_cfg().get("auth", {}).get("token", "")
+        if token:
+            key = request.headers.get("X-Api-Key", "")
+            if key != token:
+                return jsonify({"error": "Non autorizzato"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 
 # ── Config globale ────────────────────────────────────────────────────────────
 _config      = {}
@@ -415,8 +434,29 @@ if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG
     _bg_thread.start()
 
 
+# ── Endpoint Auth ────────────────────────────────────────────────────────────
+@app.route("/api/auth/status")
+def auth_status():
+    """Indica se l'autenticazione è abilitata — non richiede token"""
+    token = get_cfg().get("auth", {}).get("token", "")
+    return jsonify({"auth_enabled": bool(token)})
+
+
+@app.route("/api/auth/verify", methods=["POST"])
+def auth_verify():
+    """Verifica un token inviato dal frontend — non richiede token nell'header"""
+    token = get_cfg().get("auth", {}).get("token", "")
+    if not token:
+        return jsonify({"ok": True})   # auth disabilitata: tutto aperto
+    key = (request.get_json(force=True) or {}).get("token", "")
+    if key == token:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False}), 401
+
+
 # ── Endpoint PC ───────────────────────────────────────────────────────────────
 @app.route("/api/pcs", methods=["GET"])
+@require_auth
 def get_pcs():
     """Restituisce la cache aggiornata in background — risposta istantanea"""
     with _cache_lock:
@@ -424,6 +464,7 @@ def get_pcs():
 
 
 @app.route("/api/wol/<hostname>", methods=["POST"])
+@require_auth
 def wake_on_lan(hostname: str):
     """Invia magic packet WOL"""
     cfg = get_cfg()
@@ -440,6 +481,7 @@ def wake_on_lan(hostname: str):
 
 
 @app.route("/api/shutdown/<hostname>", methods=["POST"])
+@require_auth
 def shutdown_pc(hostname: str):
     """Spegne il PC remoto tramite WMI (Win32Shutdown flag=12 = force power off)"""
     cfg = get_cfg()
@@ -466,6 +508,7 @@ def shutdown_pc(hostname: str):
 
 
 @app.route("/api/ping/<hostname>", methods=["GET"])
+@require_auth
 def ping_single(hostname: str):
     """Ping rapido su un singolo PC"""
     cfg = get_cfg()
@@ -478,30 +521,40 @@ def ping_single(hostname: str):
 
 # ── Endpoint Config ───────────────────────────────────────────────────────────
 @app.route("/api/config", methods=["GET"])
+@require_auth
 def get_config():
-    """Ritorna la config corrente — password mascherata"""
+    """Ritorna la config corrente — password e auth token mascherati"""
     cfg  = get_cfg()
     safe = json_lib.loads(json_lib.dumps(cfg))   # deep copy
     if "wmi" in safe and "pass" in safe["wmi"]:
         safe["wmi"]["pass"] = "***"
+    # Maschera auth token: il frontend mostra *** se impostato
+    if safe.get("auth", {}).get("token"):
+        safe.setdefault("auth", {})["token"] = "***"
     return jsonify(safe)
 
 
 @app.route("/api/config", methods=["POST"])
+@require_auth
 def post_config():
     """
     Salva e applica una nuova config.
-    Se il campo wmi.pass è "***" mantiene la password esistente.
+    Se il campo wmi.pass o auth.token è "***" mantiene il valore esistente.
     Riavvia il ciclo di polling immediatamente.
     """
     data = request.get_json(force=True)
     if not data:
         return jsonify({"error": "JSON non valido"}), 400
 
+    old_cfg = get_cfg()
+
     # Preserva la password se il frontend ha inviato il placeholder
     if data.get("wmi", {}).get("pass") == "***":
-        old_cfg = get_cfg()
         data["wmi"]["pass"] = old_cfg.get("wmi", {}).get("pass", "")
+
+    # Preserva auth token se il frontend ha inviato il placeholder
+    if data.get("auth", {}).get("token") == "***":
+        data.setdefault("auth", {})["token"] = old_cfg.get("auth", {}).get("token", "")
 
     save_config(data)
     apply_config(data)
@@ -514,6 +567,7 @@ def post_config():
 
 
 @app.route("/api/config/test-wmi", methods=["POST"])
+@require_auth
 def test_wmi():
     """
     Testa le credenziali WMI su un IP specifico.
@@ -552,6 +606,7 @@ def get_floorplan():
 
 
 @app.route("/api/floorplan/upload", methods=["POST"])
+@require_auth
 def upload_floorplan():
     """
     Carica una nuova immagine piantina (jpg/png).
@@ -574,6 +629,7 @@ def upload_floorplan():
 
 # ── Endpoint Posizioni ────────────────────────────────────────────────────────
 @app.route("/api/positions", methods=["GET"])
+@require_auth
 def get_positions():
     """Legge le posizioni salvate dei PC sulla piantina"""
     if os.path.exists(POSITIONS_FILE):
@@ -583,6 +639,7 @@ def get_positions():
 
 
 @app.route("/api/positions", methods=["POST"])
+@require_auth
 def save_positions():
     """Salva le posizioni dei PC sulla piantina"""
     data = request.get_json()
@@ -631,6 +688,7 @@ def update_check():
 
 
 @app.route("/api/update/apply", methods=["POST"])
+@require_auth
 def update_apply():
     """Scarica l'ultima release, aggiorna i file e riavvia il servizio"""
     try:

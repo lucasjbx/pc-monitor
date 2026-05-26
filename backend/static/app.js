@@ -29,8 +29,103 @@ let listCollapsed = localStorage.getItem('pcListCollapsed') === '1';
 let listSortKey   = localStorage.getItem('pcListSort')    || 'hostname';
 let listSortDir   = localStorage.getItem('pcListSortDir') || 'asc';
 
+// Stato autenticazione
+let authToken = localStorage.getItem('pcMonitorToken') || '';
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+/**
+ * Wrapper fetch che aggiunge X-Api-Key e gestisce automaticamente 401 → login overlay.
+ */
+async function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (authToken) headers['X-Api-Key'] = authToken;
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    authToken = '';
+    localStorage.removeItem('pcMonitorToken');
+    showLoginOverlay();
+    throw new Error('401');
+  }
+  return res;
+}
+
+async function initAuth() {
+  try {
+    const res  = await fetch('/api/auth/status');
+    const data = await res.json();
+    if (!data.auth_enabled) return true;   // nessuna auth richiesta
+  } catch { return true; }                  // se non raggiunge l'endpoint, procede
+
+  if (authToken) {
+    try {
+      const vres = await fetch('/api/auth/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ token: authToken }),
+      });
+      if (vres.ok) return true;   // token valido
+    } catch {}
+    // token non valido o scaduto — cancella e mostra login
+    authToken = '';
+    localStorage.removeItem('pcMonitorToken');
+  }
+  showLoginOverlay();
+  return false;
+}
+
+function showLoginOverlay() {
+  document.getElementById('login-overlay').classList.remove('hidden');
+  document.getElementById('login-token').value = '';
+  document.getElementById('login-error').classList.add('hidden');
+  setTimeout(() => document.getElementById('login-token').focus(), 50);
+}
+
+function hideLoginOverlay() {
+  document.getElementById('login-overlay').classList.add('hidden');
+}
+
+async function attemptLogin() {
+  const token = document.getElementById('login-token').value.trim();
+  if (!token) return;
+  const btn = document.getElementById('btn-login');
+  btn.textContent = '⟳ Verifica…';
+  btn.disabled    = true;
+  document.getElementById('login-error').classList.add('hidden');
+  try {
+    const res = await fetch('/api/auth/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ token }),
+    });
+    if (res.ok) {
+      authToken = token;
+      localStorage.setItem('pcMonitorToken', token);
+      hideLoginOverlay();
+      startApp();
+    } else {
+      document.getElementById('login-error').classList.remove('hidden');
+    }
+  } catch {
+    document.getElementById('login-error').textContent = 'Errore di connessione';
+    document.getElementById('login-error').classList.remove('hidden');
+  } finally {
+    btn.textContent = 'Accedi';
+    btn.disabled    = false;
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  // Login overlay
+  document.getElementById('btn-login').addEventListener('click', attemptLogin);
+  document.getElementById('btn-toggle-login-pass').addEventListener('click', () => {
+    const inp = document.getElementById('login-token');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  });
+  document.getElementById('login-token').addEventListener('keydown', e => {
+    if (e.key === 'Enter') attemptLogin();
+  });
+
   // Header
   document.getElementById('btn-refresh').addEventListener('click', () => loadPcs(true));
   document.getElementById('btn-editor').addEventListener('click', openEditor);
@@ -109,6 +204,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
   document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
   document.getElementById('btn-toggle-pass').addEventListener('click', togglePassVisibility);
+  document.getElementById('btn-toggle-auth-token').addEventListener('click', () => {
+    const inp = document.getElementById('cfg-auth-token');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  });
   document.getElementById('btn-test-wmi').addEventListener('click', testWmiConnection);
   document.getElementById('btn-add-pc').addEventListener('click', showAddPcForm);
   document.getElementById('btn-pc-form-ok').addEventListener('click', confirmPcForm);
@@ -166,13 +265,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('pc-list-toggle').textContent = '❯';
   }
 
+  // Avvia autenticazione — se ok chiama startApp()
+  const authed = await initAuth();
+  if (authed) startApp();
+});
+
+async function startApp() {
   await loadSedeName();
   await loadPositions();
   await loadPcs();
   setInterval(loadPcs, 5000);
   checkForUpdates();
   setInterval(checkForUpdates, 3600000); // ogni ora
-});
+}
 
 // ── API ───────────────────────────────────────────────────────────────────────
 async function loadPcs(manual = false) {
@@ -182,7 +287,7 @@ async function loadPcs(manual = false) {
   if (manual) btn.textContent = '⟳ …';
 
   try {
-    const res = await fetch('/api/pcs');
+    const res = await apiFetch('/api/pcs');
     if (!res.ok) throw new Error();
     pcs = await res.json();
     clearError();
@@ -206,7 +311,7 @@ async function loadPcs(manual = false) {
 
 async function loadSedeName() {
   try {
-    const res  = await fetch('/api/config');
+    const res  = await apiFetch('/api/config');
     const cfg  = await res.json();
     const name = cfg?.sede?.name;
     if (name) document.getElementById('sede-title').textContent = name;
@@ -215,7 +320,7 @@ async function loadSedeName() {
 
 async function loadPositions() {
   try {
-    const res = await fetch('/api/positions');
+    const res = await apiFetch('/api/positions');
     positions = await res.json();
   } catch {}
 }
@@ -414,7 +519,7 @@ async function doWol(hostname) {
   wolStatus[hostname] = 'sending';
   refreshPanelIfOpen(hostname);
   try {
-    const res  = await fetch(`/api/wol/${hostname}`, { method: 'POST' });
+    const res  = await apiFetch(`/api/wol/${hostname}`, { method: 'POST' });
     const data = await res.json();
     wolStatus[hostname] = data.ok ? 'sent' : 'error';
     if (data.ok) setTimeout(() => { wolStatus[hostname] = null; refreshPanelIfOpen(hostname); }, 5000);
@@ -429,7 +534,7 @@ async function doShutdown(hostname) {
   shutdownStatus[hostname] = 'sending';
   refreshPanelIfOpen(hostname);
   try {
-    const res  = await fetch(`/api/shutdown/${hostname}`, { method: 'POST' });
+    const res  = await apiFetch(`/api/shutdown/${hostname}`, { method: 'POST' });
     const data = await res.json();
     shutdownStatus[hostname] = data.ok ? 'ok' : 'error';
     if (data.ok) setTimeout(() => { shutdownStatus[hostname] = null; refreshPanelIfOpen(hostname); }, 5000);
@@ -596,7 +701,7 @@ async function savePositions() {
   btn.textContent = 'Salvataggio…';
   btn.disabled    = true;
   try {
-    await fetch('/api/positions', {
+    await apiFetch('/api/positions', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(editorPos),
@@ -613,7 +718,7 @@ async function savePositions() {
 // ── Impostazioni ──────────────────────────────────────────────────────────────
 async function openSettings() {
   try {
-    const res = await fetch('/api/config');
+    const res = await apiFetch('/api/config');
     settingsConfig = await res.json();
   } catch {
     settingsConfig = {};
@@ -637,13 +742,14 @@ function closeSettings() {
 
 function populateSettingsForm() {
   const s = settingsConfig;
-  document.getElementById('cfg-sede-name').value    = s?.sede?.name          ?? '';
+  document.getElementById('cfg-sede-name').value     = s?.sede?.name          ?? '';
   document.getElementById('cfg-poll-interval').value = s?.sede?.poll_interval ?? 10;
   document.getElementById('cfg-wol-broadcast').value = s?.network?.wol_broadcast ?? '';
   document.getElementById('cfg-gateway-ip').value    = s?.network?.gateway_ip    ?? '';
   document.getElementById('cfg-dc-ip').value         = s?.network?.dc_ip         ?? '';
-  document.getElementById('cfg-wmi-user').value      = s?.wmi?.user ?? '';
-  document.getElementById('cfg-wmi-pass').value      = s?.wmi?.pass ?? '';   // backend ritorna ***
+  document.getElementById('cfg-wmi-user').value      = s?.wmi?.user  ?? '';
+  document.getElementById('cfg-wmi-pass').value      = s?.wmi?.pass  ?? '';   // backend ritorna ***
+  document.getElementById('cfg-auth-token').value    = s?.auth?.token ?? '';  // backend ritorna *** se impostato
 }
 
 function collectSettingsForm() {
@@ -659,7 +765,10 @@ function collectSettingsForm() {
     },
     wmi: {
       user: document.getElementById('cfg-wmi-user').value.trim(),
-      pass: document.getElementById('cfg-wmi-pass').value,   // "***" o nuova password
+      pass: document.getElementById('cfg-wmi-pass').value,        // "***" o nuova password
+    },
+    auth: {
+      token: document.getElementById('cfg-auth-token').value,     // "***" o nuova chiave o ""
     },
     pcs: settingsConfig.pcs || [],
   };
@@ -671,7 +780,7 @@ async function saveSettings() {
   btn.disabled    = true;
   try {
     const cfg = collectSettingsForm();
-    const res = await fetch('/api/config', {
+    const res = await apiFetch('/api/config', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(cfg),
@@ -681,6 +790,13 @@ async function saveSettings() {
       // Aggiorna titolo sede nell'header
       if (cfg.sede?.name) {
         document.getElementById('sede-title').textContent = cfg.sede.name;
+      }
+      // Aggiorna authToken in memoria se l'utente ha cambiato o rimosso la chiave
+      const newToken = cfg.auth?.token ?? '';
+      if (newToken !== '***') {
+        authToken = newToken;
+        if (newToken) localStorage.setItem('pcMonitorToken', newToken);
+        else          localStorage.removeItem('pcMonitorToken');
       }
       btn.textContent = '✓ Salvato';
       setTimeout(() => {
@@ -720,7 +836,7 @@ async function testWmiConnection() {
   setSettingsResult('wmi-test-result', '', false);
 
   try {
-    const res  = await fetch('/api/config/test-wmi', {
+    const res  = await apiFetch('/api/config/test-wmi', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ ip, user, pass }),
@@ -844,7 +960,7 @@ async function uploadFloorplan() {
   const fd = new FormData();
   fd.append('file', file);
   try {
-    const res  = await fetch('/api/floorplan/upload', { method: 'POST', body: fd });
+    const res  = await apiFetch('/api/floorplan/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (data.ok) {
       setSettingsResult('floorplan-upload-result', '✓ Piantina aggiornata', true);
@@ -1082,7 +1198,7 @@ function escHtml(s) {
 // ── Aggiornamenti ─────────────────────────────────────────────────────────────
 async function checkForUpdates() {
   try {
-    const res  = await fetch('/api/update/check');
+    const res  = await apiFetch('/api/update/check');
     if (!res.ok) return;
     const data = await res.json();
     const badge = document.getElementById('update-badge');
@@ -1116,7 +1232,7 @@ async function applyUpdate() {
   overlay.classList.remove('hidden');
   msg.textContent = 'Aggiornamento in corso…';
   try {
-    const res  = await fetch('/api/update/apply', { method: 'POST' });
+    const res  = await apiFetch('/api/update/apply', { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
       msg.textContent = `Aggiornato a v${data.version}. Riavvio in corso…`;
