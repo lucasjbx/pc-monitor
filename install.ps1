@@ -127,6 +127,22 @@ foreach ($f in $savedBinary.Keys) {
 
 New-Item -ItemType Directory -Force "$InstallDir\logs" | Out-Null
 
+# Crea la chiave Registry per i segreti e la blocca a SYSTEM-only
+# (password WMI e auth token non vengono mai scritti in config.json)
+$regPath = "HKLM:\SOFTWARE\PcMonitor\Secrets"
+if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+$acl = Get-Acl $regPath
+$acl.SetAccessRuleProtection($true, $false)   # disabilita ereditarietà da parent
+$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+    "NT AUTHORITY\SYSTEM",
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+$acl.SetAccessRule($rule)
+Set-Acl -Path $regPath -AclObject $acl
+
 # Applica config sede se specificata
 if ($ConfigFile -and (Test-Path $ConfigFile)) {
     Copy-Item $ConfigFile "$InstallDir\backend\config.json" -Force

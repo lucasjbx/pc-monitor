@@ -33,16 +33,60 @@ GITHUB_REPO    = "lucasjbx/pc-monitor"
 SERVICE_NAME   = "PcMonitor"
 PRESERVE_ON_UPDATE = {"config.json", "positions.json"}
 
+# ── Registry segreti ──────────────────────────────────────────────────────────
+# I segreti (password WMI, auth token) vengono salvati in una chiave Registry
+# protetta SYSTEM-only, separata da config.json che contiene solo dati non sensibili.
+SECRETS_REG_PATH  = r"SOFTWARE\PcMonitor\Secrets"
+SECRET_WMI_PASS   = "WmiPass"
+SECRET_AUTH_TOKEN = "AuthToken"
+
+
+def get_secret(name: str) -> str:
+    """
+    Legge un segreto dalla chiave Registry HKLM\\SOFTWARE\\PcMonitor\\Secrets.
+    La chiave è protetta SYSTEM-only; in ambienti non-Windows o senza accesso ritorna ''.
+    """
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, name)
+        winreg.CloseKey(key)
+        return val or ""
+    except Exception:
+        return ""
+
+
+def set_secret(name: str, value: str) -> None:
+    """
+    Scrive o cancella un segreto nella chiave Registry.
+    Richiede SYSTEM o un account con FullControl sulla chiave.
+    Silenzioso se la chiave non esiste o i permessi mancano (non-Windows, ambienti dev).
+    """
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH,
+                             0, winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
+        if value:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+        else:
+            try:
+                winreg.DeleteValue(key, name)
+            except OSError:
+                pass
+        winreg.CloseKey(key)
+    except Exception:
+        pass   # silenzioso: non-Windows o accesso negato
+
 
 # ── Autenticazione ────────────────────────────────────────────────────────────
 def require_auth(f):
     """
-    Decorator — verifica X-Api-Key se auth.token è configurato in config.json.
+    Decorator — verifica X-Api-Key se auth token è configurato nel Registry.
     Se il token è vuoto, l'endpoint è aperto senza autenticazione (retrocompatibile).
     """
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = get_cfg().get("auth", {}).get("token", "")
+        token = get_secret(SECRET_AUTH_TOKEN)
         if token:
             key = request.headers.get("X-Api-Key", "")
             if key != token:
@@ -73,7 +117,7 @@ def lookup_fullname_ad(username: str) -> str:
     cfg      = get_cfg()
     dc_ip    = cfg.get("network", {}).get("dc_ip", "")
     wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = cfg.get("wmi", {}).get("pass", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
 
     if username:
         try:
@@ -131,6 +175,29 @@ def get_cfg() -> dict:
 
 # Carica all'avvio
 apply_config(load_config())
+
+
+def _migrate_secrets_to_registry():
+    """
+    Migrazione una-tantum: se config.json contiene ancora wmi.pass o auth.token in chiaro,
+    li sposta nel Registry e li azzera nel file.  Eseguita ad ogni avvio ma è idempotente.
+    """
+    cfg     = get_cfg()
+    changed = False
+    if cfg.get("wmi", {}).get("pass"):
+        set_secret(SECRET_WMI_PASS, cfg["wmi"]["pass"])
+        cfg["wmi"]["pass"] = ""
+        changed = True
+    if cfg.get("auth", {}).get("token"):
+        set_secret(SECRET_AUTH_TOKEN, cfg["auth"]["token"])
+        cfg["auth"]["token"] = ""
+        changed = True
+    if changed:
+        save_config(cfg)
+        apply_config(cfg)
+
+
+_migrate_secrets_to_registry()
 
 
 # ── Helpers di rete ───────────────────────────────────────────────────────────
@@ -214,7 +281,7 @@ def get_static_wmi(pc: dict) -> dict:
         return result
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = cfg.get("wmi", {}).get("pass", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
     try:
         import wmi as wmilib
         import pythoncom
@@ -301,7 +368,7 @@ def get_dynamic_wmi(ip: str) -> dict:
         return result
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = cfg.get("wmi", {}).get("pass", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
     try:
         import wmi as wmilib
         import pythoncom
@@ -438,14 +505,14 @@ if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG
 @app.route("/api/auth/status")
 def auth_status():
     """Indica se l'autenticazione è abilitata — non richiede token"""
-    token = get_cfg().get("auth", {}).get("token", "")
+    token = get_secret(SECRET_AUTH_TOKEN)
     return jsonify({"auth_enabled": bool(token)})
 
 
 @app.route("/api/auth/verify", methods=["POST"])
 def auth_verify():
     """Verifica un token inviato dal frontend — non richiede token nell'header"""
-    token = get_cfg().get("auth", {}).get("token", "")
+    token = get_secret(SECRET_AUTH_TOKEN)
     if not token:
         return jsonify({"ok": True})   # auth disabilitata: tutto aperto
     key = (request.get_json(force=True) or {}).get("token", "")
@@ -491,7 +558,7 @@ def shutdown_pc(hostname: str):
     if not pc.get("ip"):
         return jsonify({"error": "IP non disponibile"}), 400
     wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = cfg.get("wmi", {}).get("pass", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
     try:
         import wmi
         import pythoncom
@@ -526,11 +593,9 @@ def get_config():
     """Ritorna la config corrente — password e auth token mascherati"""
     cfg  = get_cfg()
     safe = json_lib.loads(json_lib.dumps(cfg))   # deep copy
-    if "wmi" in safe and "pass" in safe["wmi"]:
-        safe["wmi"]["pass"] = "***"
-    # Maschera auth token: il frontend mostra *** se impostato
-    if safe.get("auth", {}).get("token"):
-        safe.setdefault("auth", {})["token"] = "***"
+    # Mostra *** se il segreto è impostato nel Registry, "" altrimenti
+    safe.setdefault("wmi",  {})["pass"]  = "***" if get_secret(SECRET_WMI_PASS)   else ""
+    safe.setdefault("auth", {})["token"] = "***" if get_secret(SECRET_AUTH_TOKEN) else ""
     return jsonify(safe)
 
 
@@ -539,22 +604,24 @@ def get_config():
 def post_config():
     """
     Salva e applica una nuova config.
-    Se il campo wmi.pass o auth.token è "***" mantiene il valore esistente.
+    I segreti (wmi.pass, auth.token) vengono scritti nel Registry e rimossi dal JSON.
+    Se il valore è "***" (placeholder frontend) il segreto esistente non viene modificato.
     Riavvia il ciclo di polling immediatamente.
     """
     data = request.get_json(force=True)
     if not data:
         return jsonify({"error": "JSON non valido"}), 400
 
-    old_cfg = get_cfg()
+    # Segreti → Registry (non salvare mai in config.json)
+    wmi_pass = data.get("wmi", {}).get("pass", "")
+    if wmi_pass != "***":       # "***" = mantieni segreto esistente
+        set_secret(SECRET_WMI_PASS, wmi_pass)
+    data.setdefault("wmi", {})["pass"] = ""   # azzerato nel file
 
-    # Preserva la password se il frontend ha inviato il placeholder
-    if data.get("wmi", {}).get("pass") == "***":
-        data["wmi"]["pass"] = old_cfg.get("wmi", {}).get("pass", "")
-
-    # Preserva auth token se il frontend ha inviato il placeholder
-    if data.get("auth", {}).get("token") == "***":
-        data.setdefault("auth", {})["token"] = old_cfg.get("auth", {}).get("token", "")
+    auth_token = data.get("auth", {}).get("token", "")
+    if auth_token != "***":
+        set_secret(SECRET_AUTH_TOKEN, auth_token)
+    data.setdefault("auth", {})["token"] = ""  # azzerato nel file
 
     save_config(data)
     apply_config(data)
@@ -576,11 +643,9 @@ def test_wmi():
     data     = request.get_json(force=True) or {}
     ip       = data.get("ip", "")
     wmi_user = data.get("user", "")
-    wmi_pass = data.get("pass", "")
-
-    # Se pass è placeholder usa quella salvata
-    if wmi_pass == "***":
-        wmi_pass = get_cfg().get("wmi", {}).get("pass", "")
+    # Ignora "***" (placeholder) e usa sempre il segreto dal Registry
+    raw_pass = data.get("pass", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS) if raw_pass == "***" or not raw_pass else raw_pass
 
     if not ip:
         return jsonify({"error": "IP mancante"}), 400
