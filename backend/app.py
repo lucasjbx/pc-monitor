@@ -296,6 +296,10 @@ def get_static_wmi(pc: dict) -> dict:
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
+    # Se le credenziali WMI non sono configurate, salta la query per evitare
+    # auth fallite in loop che potrebbero bloccare l'account AD
+    if not wmi_user or not wmi_pass:
+        return result
     try:
         import wmi as wmilib
         import pythoncom
@@ -383,6 +387,10 @@ def get_dynamic_wmi(ip: str) -> dict:
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
+    # Se le credenziali WMI non sono configurate, salta la query per evitare
+    # auth fallite in loop che potrebbero bloccare l'account AD
+    if not wmi_user or not wmi_pass:
+        return result
     try:
         import wmi as wmilib
         import pythoncom
@@ -573,6 +581,8 @@ def shutdown_pc(hostname: str):
         return jsonify({"error": "IP non disponibile"}), 400
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return jsonify({"error": "Credenziali WMI non configurate"}), 400
     try:
         import wmi
         import pythoncom
