@@ -442,12 +442,18 @@ body {
 .editor-instruction.active { color: #facc15; font-weight: 500; }
 
 .editor-image-wrapper {
-  position: relative; flex: 1; overflow: auto;
+  flex: 1; overflow: auto;
+  /* Niente position:relative qui — lo gestisce .editor-image-frame */
 }
-.editor-image-wrapper img {
+/* Frame interno: si auto-dimensiona all'immagine come #floorplan-container in vista normale */
+.editor-image-frame {
+  position: relative;
+  width: 100%;
+}
+.editor-image-frame img {
   width: 100%; height: auto; display: block; user-select: none;
 }
-.editor-image-wrapper img.crosshair { cursor: crosshair; }
+.editor-image-frame img.crosshair { cursor: crosshair; }
 
 .editor-marker {
   position: absolute; transform: translate(-50%, -50%);
@@ -526,7 +532,7 @@ body {
 }
 
 /* Evidenzia la mappa quando si trascina sopra */
-.editor-image-wrapper img.drop-target {
+.editor-image-frame img.drop-target {
   outline: 2px dashed #3b82f6;
   outline-offset: -2px;
 }
