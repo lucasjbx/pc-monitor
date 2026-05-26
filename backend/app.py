@@ -70,12 +70,15 @@ def set_secret(name: str, value: str) -> bool:
     Scrive o cancella un segreto nella chiave Registry.
     Crea la chiave se non esiste (CreateKeyEx).
     Ritorna True se l'operazione è riuscita, False altrimenti.
+    NOTA: winreg.CreateKeyEx in Python ritorna un handle singolo (non una tupla
+    come la C API) — non fare tuple unpacking.
     """
     try:
         import winreg
         # CreateKeyEx crea la chiave se non esiste (a differenza di OpenKey)
-        key, _ = winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH,
-                                    0, winreg.KEY_SET_VALUE)
+        # Restituisce un PyHKEY handle — NON una tupla
+        key = winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, SECRETS_REG_PATH,
+                                 0, winreg.KEY_SET_VALUE)
         if value:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
         else:
@@ -636,16 +639,22 @@ def post_config():
     if not data:
         return jsonify({"error": "JSON non valido"}), 400
 
-    # Segreti → Registry (non salvare mai in config.json)
+    # Segreti → Registry; azzerali nel file solo se la scrittura è riuscita
     wmi_pass = data.get("wmi", {}).get("pass", "")
     if wmi_pass != "***":       # "***" = mantieni segreto esistente
-        set_secret(SECRET_WMI_PASS, wmi_pass)
-    data.setdefault("wmi", {})["pass"] = ""   # azzerato nel file
+        if set_secret(SECRET_WMI_PASS, wmi_pass) or not wmi_pass:
+            data.setdefault("wmi", {})["pass"] = ""   # rimosso dal file
+        # se set_secret fallisce e la password non è vuota: la lascia in config.json
+        # come fallback (get_secret() la troverà lì finché il Registry non è disponibile)
+    else:
+        data.setdefault("wmi", {})["pass"] = ""
 
     auth_token = data.get("auth", {}).get("token", "")
     if auth_token != "***":
-        set_secret(SECRET_AUTH_TOKEN, auth_token)
-    data.setdefault("auth", {})["token"] = ""  # azzerato nel file
+        if set_secret(SECRET_AUTH_TOKEN, auth_token) or not auth_token:
+            data.setdefault("auth", {})["token"] = ""
+    else:
+        data.setdefault("auth", {})["token"] = ""
 
     save_config(data)
     apply_config(data)
