@@ -173,8 +173,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       const cy   = (e.clientY - rect.top)  / rect.height;
       const x    = Math.max(0, Math.min(1, cx - _drag.offsetX));
       const y    = Math.max(0, Math.min(1, cy - _drag.offsetY));
-      _drag.el.style.left = `${x * 100}%`;
-      _drag.el.style.top  = `${y * 100}%`;
+      _drag.el.style.left = `${x * img.offsetWidth}px`;
+      _drag.el.style.top  = `${y * img.offsetHeight}px`;
       editorPos[_drag.hostname] = { x, y };
     } else if (_pan) {
       panX = _pan.startPanX + (e.clientX - _pan.startX);
@@ -604,6 +604,8 @@ function refreshPanelIfOpen(hostname) {
 }
 
 // ── Editor posizioni ──────────────────────────────────────────────────────────
+let _editorResizeHandler = null;
+
 function openEditor() {
   editorPos      = { ...positions };
   editorSelected = null;
@@ -615,10 +617,18 @@ function openEditor() {
   renderEditorMarkers();
   updateEditorInstruction();
   document.getElementById('editor-overlay').classList.remove('hidden');
+  // Ricalcola i marker in pixel se la finestra viene ridimensionata
+  if (_editorResizeHandler) window.removeEventListener('resize', _editorResizeHandler);
+  _editorResizeHandler = () => renderEditorMarkers();
+  window.addEventListener('resize', _editorResizeHandler);
 }
 
 function closeEditor() {
   if (_drag) { _drag.el.classList.remove('dragging'); _drag = null; }
+  if (_editorResizeHandler) {
+    window.removeEventListener('resize', _editorResizeHandler);
+    _editorResizeHandler = null;
+  }
   document.getElementById('editor-overlay').classList.add('hidden');
 }
 
@@ -702,12 +712,24 @@ function renderEditorSidebar() {
 
 function renderEditorMarkers() {
   const container = document.getElementById('editor-markers');
+  const img       = document.getElementById('editor-img');
   container.innerHTML = '';
+
+  // Usa i pixel REALI dell'immagine, non le percentuali del container CSS.
+  // Questo elimina qualsiasi dipendenza dalle dimensioni del contenitore flex/wrapper.
+  const iw = img.offsetWidth;
+  const ih = img.offsetHeight;
+  if (!iw || !ih) {
+    // Immagine non ancora caricata: riprova al load
+    img.addEventListener('load', renderEditorMarkers, { once: true });
+    return;
+  }
+
   for (const [hostname, pos] of Object.entries(editorPos)) {
     const el = document.createElement('div');
     el.className  = `editor-marker${editorSelected === hostname ? ' active' : ''}`;
-    el.style.left = `${pos.x * 100}%`;
-    el.style.top  = `${pos.y * 100}%`;
+    el.style.left = `${pos.x * iw}px`;
+    el.style.top  = `${pos.y * ih}px`;
     el.dataset.hostname = hostname;
 
     const label = document.createElement('span');
