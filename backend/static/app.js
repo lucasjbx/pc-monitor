@@ -614,9 +614,11 @@ function openEditor() {
   saveBtn.disabled    = false;
   saveBtn.textContent = 'Salva';
   renderEditorSidebar();
-  renderEditorMarkers();
   updateEditorInstruction();
+  // PRIMA mostra l'overlay, POI renderizza i marker in pixel.
+  // Con display:none il browser non esegue il layout → img.offsetWidth = 0.
   document.getElementById('editor-overlay').classList.remove('hidden');
+  requestAnimationFrame(() => renderEditorMarkers());
   // Ricalcola i marker in pixel se la finestra viene ridimensionata
   if (_editorResizeHandler) window.removeEventListener('resize', _editorResizeHandler);
   _editorResizeHandler = () => renderEditorMarkers();
