@@ -26,6 +26,17 @@ Template vuoto: `backend/config.example.json`.
 - Commenti nel codice: italiano
 - Variabili e funzioni: inglese
 
+## Workflow
+- **Branch di sviluppo**: lavorare sempre su `dev` (o `feature/*`), mai su `main` direttamente
+- **`main` = stabile**: i colleghi aggiornano dall'UI che scarica l'ultima GitHub Release
+- **Test locale prima del merge**: avviare `python app.py`, aprire il browser e verificare manualmente le funzionalità toccate; poi fare PR `dev → main`
+- **Release solo da `main`**: dopo il merge, bumpa `version.txt` e crea la GitHub Release
+- **Checklist test manuale veloce**:
+  - [ ] Mappa carica e mostra marker
+  - [ ] Editor posizioni: drag-and-drop funziona, salvataggio OK
+  - [ ] Pannello PC laterale: lista, selezione, WOL/shutdown
+  - [ ] Impostazioni: salvataggio e reload
+
 ## Dipendenze Backend
 ```
 flask, flask-cors, pywin32, wmi, python-dotenv
