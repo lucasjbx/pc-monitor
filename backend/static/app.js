@@ -247,9 +247,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyTransform();
   }, { passive: false });
 
-  // Pan con mouse — drag sulla piantina (disabilitato in edit mode)
+  // Pan con mouse — drag sulla piantina (funziona anche in edit mode: mousedown+move=pan, click=piazza PC)
   document.getElementById('floorplan-wrapper').addEventListener('mousedown', e => {
-    if (editingMode) return;
     if (e.target.closest('.marker') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
     e.preventDefault();
     _pan = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY };
@@ -393,6 +392,7 @@ function renderStats() {
 }
 
 function renderMarkers() {
+  if (editingMode) return;   // non sovrascrivere i marker editor durante il polling
   const placed = Object.keys(positions);
   const hasPos = placed.length > 0;
   document.getElementById('floorplan-wrapper').classList.toggle('hidden', !hasPos);
