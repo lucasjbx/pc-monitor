@@ -5,7 +5,7 @@ Piantina interattiva con stato online/offline, utente loggato, dati hardware e W
 
 ## Installazione
 
-Eseguire come **Administrator** su Windows Server (AD04):
+Eseguire come **Administrator** sul Windows Server della sede:
 
 ```powershell
 irm https://raw.githubusercontent.com/lucasjbx/pc-monitor/main/bootstrap.ps1 | iex
