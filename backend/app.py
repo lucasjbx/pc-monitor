@@ -621,6 +621,39 @@ def rdp_file(hostname: str):
         headers={"Content-Disposition": f'attachment; filename="{hostname}.rdp"'}
     )
 
+@app.route("/api/rdp-setup.reg", methods=["GET"])
+@require_auth
+def rdp_setup_reg():
+    """Genera un file .reg che registra rdp:// → mstsc.exe su Windows (setup una-tantum)."""
+    ps_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    ps_cmd  = r"$ip='%1'-replace'^rdp://(full%20address=s:)?',''-replace'&.*$',''-replace'/$','';Start-Process mstsc.exe ('/v:'+$ip)"
+    raw_cmd = f'"{ps_path}" -WindowStyle Hidden -Command "{ps_cmd}"'
+
+    def reg_esc(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    lines = [
+        "Windows Registry Editor Version 5.00",
+        "",
+        r"[HKEY_CURRENT_USER\Software\Classes\rdp]",
+        '@="URL:Remote Desktop Protocol"',
+        '"URL Protocol"=""',
+        "",
+        r"[HKEY_CURRENT_USER\Software\Classes\rdp\shell]",
+        "",
+        r"[HKEY_CURRENT_USER\Software\Classes\rdp\shell\open]",
+        "",
+        r"[HKEY_CURRENT_USER\Software\Classes\rdp\shell\open\command]",
+        f'@="{reg_esc(raw_cmd)}"',
+        "",
+    ]
+    content = "\r\n".join(lines)
+    return Response(
+        content,
+        mimetype="text/plain",
+        headers={"Content-Disposition": 'attachment; filename="rdp-setup.reg"'}
+    )
+
 
 @app.route("/api/ping/<hostname>", methods=["GET"])
 @require_auth
