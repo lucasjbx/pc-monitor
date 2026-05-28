@@ -553,6 +553,15 @@ function renderPanelActions(pc) {
     }
   }
 
+  // Remote Desktop (solo se online e ha IP)
+  if (pc.online && pc.ip) {
+    const btn = document.createElement('a');
+    btn.className   = 'btn-action rdp';
+    btn.textContent = '🖥 Remote Desktop';
+    btn.href        = `rdp://full%20address=s:${pc.ip}`;
+    container.appendChild(btn);
+  }
+
   if (!pc.ip) {
     const note = document.createElement('p');
     note.className   = 'panel-note';

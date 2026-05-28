@@ -401,6 +401,8 @@ body {
 .btn-action.shutdown   { border-color: #c0392b; color: #c0392b; }
 .btn-action.shutdown:hover:not(:disabled) { background: rgba(192,57,43,.07); }
 .btn-action.shutdown.ok { border-color: #2a7d46; color: #2a7d46; background: rgba(42,125,70,.08); }
+.btn-action.rdp        { border-color: #2563eb; color: #2563eb; text-decoration: none; }
+.btn-action.rdp:hover  { background: rgba(37,99,235,.07); }
 
 .shutdown-confirm {
   background: rgba(192,57,43,.07); border: 1px solid #c0392b;
