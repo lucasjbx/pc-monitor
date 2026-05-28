@@ -864,7 +864,7 @@ function renderEditorMarkers() {
   container.innerHTML = '';
 
   const entries = Object.entries(editorPos);
-  entries.forEach(([hostname, pos], idx) => {
+  entries.forEach(([hostname, pos]) => {
     const sel = editorSelected === hostname;
     const el  = document.createElement('div');
     el.className        = `editor-mk${sel ? ' edit-selected' : ''}`;
@@ -875,7 +875,6 @@ function renderEditorMarkers() {
     // Cerchio numerato
     const dot = document.createElement('div');
     dot.className   = 'editor-mk-dot';
-    dot.textContent = idx + 1;   // numero 1-based nella lista dei posizionati
 
     // Etichetta hostname
     const lbl = document.createElement('div');
