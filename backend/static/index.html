@@ -128,28 +128,16 @@
     <div id="panel-actions"></div>
   </div>
 
-  <!-- Editor posizioni -->
-  <div id="editor-overlay" class="editor-overlay hidden">
-    <div class="editor-container">
-      <div class="editor-map">
-        <div id="editor-instruction" class="editor-instruction">Seleziona un PC dalla lista →</div>
-        <div class="editor-image-wrapper">
-          <div class="editor-image-frame">
-            <img id="editor-img" src="/api/floorplan" alt="Piantina" draggable="false">
-            <div id="editor-markers"></div>
-          </div>
-        </div>
-      </div>
-      <div class="editor-sidebar">
-        <div class="editor-sidebar-header">
-          <h2>Posizioni PC</h2>
-          <button class="panel-close" id="btn-editor-close">✕</button>
-        </div>
-        <div id="editor-pc-list" class="editor-pc-list"></div>
-        <div class="editor-footer">
-          <button id="btn-save-positions" class="btn-save">Salva</button>
-        </div>
-      </div>
+  <!-- Editor posizioni (pannello fisso sulla destra, sovrapposto alla mappa) -->
+  <div id="editor-panel" class="editor-panel hidden">
+    <div class="editor-panel-header">
+      <h2>Posizioni PC</h2>
+      <button class="panel-close" id="btn-editor-close">✕</button>
+    </div>
+    <div id="editor-instruction" class="editor-instruction"></div>
+    <div id="editor-pc-list" class="editor-pc-list"></div>
+    <div class="editor-panel-footer">
+      <button id="btn-save-positions" class="btn-save">Salva</button>
     </div>
   </div>
 

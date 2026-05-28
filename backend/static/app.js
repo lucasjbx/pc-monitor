@@ -9,10 +9,12 @@ let shutdownStatus  = {};     // hostname → null | 'confirm' | 'sending' | 'ok
 let fetching        = false;
 
 // Stato editor
-let editorPos       = {};
-let editorSelected  = null;
-let _drag           = null;   // { hostname, el } durante il trascinamento di un marker sulla mappa
-let _sidebarDrag    = null;   // { hostname, ghostEl, startX, startY, moved } durante drag dalla lista
+let editorPos            = {};
+let editorSelected       = null;
+let editingMode          = false;
+let _drag                = null;   // { hostname, el } durante il trascinamento di un marker sulla mappa
+let _sidebarDrag         = null;   // { hostname, ghostEl, startX, startY, moved } durante drag dalla lista
+let _editorClickHandler  = null;   // listener click-to-place, aggiunto/rimosso con openEditor/closeEditor
 
 // Stato impostazioni
 let settingsConfig  = {};          // copia locale della config durante editing
@@ -139,7 +141,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Editor posizioni
   document.getElementById('btn-editor-close').addEventListener('click', closeEditor);
   document.getElementById('btn-save-positions').addEventListener('click', savePositions);
-  document.getElementById('editor-img').addEventListener('click', handleEditorClick);
   document.getElementById('editor-pc-list').addEventListener('click', handleEditorListClick);
   document.getElementById('editor-pc-list').addEventListener('mousedown', handleEditorListMousedown);
 
@@ -160,21 +161,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (_sidebarDrag.ghostEl) {
         _sidebarDrag.ghostEl.style.left = `${e.clientX}px`;
         _sidebarDrag.ghostEl.style.top  = `${e.clientY}px`;
-        const img  = document.getElementById('editor-img');
+        const img  = document.getElementById('floorplan-img');
         const rect = img.getBoundingClientRect();
         const over = e.clientX >= rect.left && e.clientX <= rect.right &&
                      e.clientY >= rect.top  && e.clientY <= rect.bottom;
         img.classList.toggle('drop-target', over);
       }
     } else if (_drag) {
-      const img  = document.getElementById('editor-img');
+      const img  = document.getElementById('floorplan-img');
       const rect = img.getBoundingClientRect();
       const cx   = (e.clientX - rect.left) / rect.width;
       const cy   = (e.clientY - rect.top)  / rect.height;
       const x    = Math.max(0, Math.min(1, cx - _drag.offsetX));
       const y    = Math.max(0, Math.min(1, cy - _drag.offsetY));
-      _drag.el.style.left = `${x * img.offsetWidth}px`;
-      _drag.el.style.top  = `${y * img.offsetHeight}px`;
+      _drag.el.style.left = `${x * 100}%`;   // percentuale — identica alla vista normale
+      _drag.el.style.top  = `${y * 100}%`;
       editorPos[_drag.hostname] = { x, y };
     } else if (_pan) {
       panX = _pan.startPanX + (e.clientX - _pan.startX);
@@ -184,7 +185,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.addEventListener('mouseup', e => {
     if (_sidebarDrag) {
-      const img = document.getElementById('editor-img');
+      const img = document.getElementById('floorplan-img');
       img.classList.remove('drop-target');
       if (_sidebarDrag.ghostEl) {
         // Rilascio dopo drag effettivo
@@ -231,6 +232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const scaler = document.getElementById('floorplan-scaler');
   scaler.addEventListener('wheel', e => {
     e.preventDefault();
+    if (editingMode) return;
     const factor  = e.deltaY < 0 ? 1.1 : 0.9;
     const newZoom = Math.max(0.5, Math.min(4, zoom * factor));
     const wrapper = document.getElementById('floorplan-wrapper');
@@ -245,8 +247,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyTransform();
   }, { passive: false });
 
-  // Pan con mouse — drag sulla piantina (sempre attivo)
+  // Pan con mouse — drag sulla piantina (disabilitato in edit mode)
   document.getElementById('floorplan-wrapper').addEventListener('mousedown', e => {
+    if (editingMode) return;
     if (e.target.closest('.marker') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
     e.preventDefault();
     _pan = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY };
@@ -635,42 +638,63 @@ function refreshPanelIfOpen(hostname) {
 }
 
 // ── Editor posizioni ──────────────────────────────────────────────────────────
-let _editorResizeHandler = null;
 
 function openEditor() {
   editorPos      = { ...positions };
   editorSelected = null;
-  // Resetta stato del bottone salva (potrebbe essere rimasto disabled dal salvataggio precedente)
+  editingMode    = true;
+
+  // Chiudi pannello PC se aperto
+  closePanel();
+
+  // Resetta zoom/pan per avere coordinate lineari (getBoundingClientRect preciso)
+  resetZoom();
+
+  // Mostra pannello editor e attiva modalità editing sulla mappa
+  document.getElementById('editor-panel').classList.remove('hidden');
+  document.body.classList.add('editing');
+
+  // Resetta bottone salva
   const saveBtn = document.getElementById('btn-save-positions');
   saveBtn.disabled    = false;
   saveBtn.textContent = 'Salva';
+
+  // Registra listener click-to-place sul container della mappa
+  _editorClickHandler = handleEditorClick;
+  document.getElementById('floorplan-container').addEventListener('click', _editorClickHandler);
+
+  renderEditorMarkers();
   renderEditorSidebar();
   updateEditorInstruction();
-  // PRIMA mostra l'overlay, POI renderizza i marker in pixel.
-  // Con display:none il browser non esegue il layout → img.offsetWidth = 0.
-  document.getElementById('editor-overlay').classList.remove('hidden');
-  requestAnimationFrame(() => renderEditorMarkers());
-  // Ricalcola i marker in pixel se la finestra viene ridimensionata
-  if (_editorResizeHandler) window.removeEventListener('resize', _editorResizeHandler);
-  _editorResizeHandler = () => renderEditorMarkers();
-  window.addEventListener('resize', _editorResizeHandler);
 }
 
 function closeEditor() {
   if (_drag) { _drag.el.classList.remove('dragging'); _drag = null; }
-  if (_editorResizeHandler) {
-    window.removeEventListener('resize', _editorResizeHandler);
-    _editorResizeHandler = null;
+
+  editingMode = false;
+  document.body.classList.remove('editing');
+  document.getElementById('editor-panel').classList.add('hidden');
+
+  // Rimuovi listener click-to-place
+  if (_editorClickHandler) {
+    document.getElementById('floorplan-container').removeEventListener('click', _editorClickHandler);
+    _editorClickHandler = null;
   }
-  document.getElementById('editor-overlay').classList.add('hidden');
+
+  // Ripristina marker normali
+  renderMarkers();
 }
 
 function handleEditorClick(e) {
-  if (!editorSelected) return;
-  const img  = document.getElementById('editor-img');
+  if (!editingMode || !editorSelected) return;
+  // Click su marker → selezione (gestita dal listener del marker stesso), non piazzamento
+  if (e.target.closest('.marker')) return;
+
+  const img  = document.getElementById('floorplan-img');
   const rect = img.getBoundingClientRect();
   const x    = (e.clientX - rect.left) / rect.width;
   const y    = (e.clientY - rect.top)  / rect.height;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;   // fuori dall'immagine
 
   editorPos[editorSelected] = { x, y };
 
@@ -710,11 +734,14 @@ function handleEditorListMousedown(e) {
 }
 
 function updateEditorInstruction() {
-  const el  = document.getElementById('editor-instruction');
-  const img = document.getElementById('editor-img');
-  img.classList.remove('crosshair');
-  el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
-  el.className   = 'editor-instruction';
+  const el = document.getElementById('editor-instruction');
+  if (editorSelected && !editorPos[editorSelected]) {
+    el.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
+    el.className   = 'editor-instruction active';
+  } else {
+    el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
+    el.className   = 'editor-instruction';
+  }
 }
 
 function renderEditorSidebar() {
@@ -744,30 +771,28 @@ function renderEditorSidebar() {
 }
 
 function renderEditorMarkers() {
-  const container = document.getElementById('editor-markers');
-  const img       = document.getElementById('editor-img');
+  // Usa lo stesso #markers e le stesse percentuali CSS della vista normale →
+  // offset impossibile per costruzione (stesso elemento DOM, stesso sistema di coordinate).
+  const container = document.getElementById('markers');
   container.innerHTML = '';
 
-  // Usa i pixel REALI dell'immagine, non le percentuali del container CSS.
-  // Questo elimina qualsiasi dipendenza dalle dimensioni del contenitore flex/wrapper.
-  const iw = img.offsetWidth;
-  const ih = img.offsetHeight;
-  if (!iw || !ih) {
-    // Immagine non ancora caricata: riprova al load
-    img.addEventListener('load', renderEditorMarkers, { once: true });
-    return;
-  }
-
   for (const [hostname, pos] of Object.entries(editorPos)) {
-    const el = document.createElement('div');
-    el.className  = `editor-marker${editorSelected === hostname ? ' active' : ''}`;
-    el.style.left = `${pos.x * iw}px`;
-    el.style.top  = `${pos.y * ih}px`;
+    const sel = editorSelected === hostname ? ' edit-selected' : '';
+    const el  = document.createElement('div');
+    el.className        = `marker edit-mode${sel}`;
+    el.style.left       = `${pos.x * 100}%`;   // percentuale identica alla vista normale
+    el.style.top        = `${pos.y * 100}%`;
     el.dataset.hostname = hostname;
 
-    const label = document.createElement('span');
-    label.textContent = hostname;
-    el.appendChild(label);
+    const dot = document.createElement('div');
+    dot.className = 'marker-dot';
+
+    const lbl = document.createElement('div');
+    lbl.className = 'marker-label';
+    const hn = document.createElement('span');
+    hn.className   = 'marker-hostname';
+    hn.textContent = hostname;
+    lbl.appendChild(hn);
 
     // Bottone × per rimozione diretta dalla mappa
     const removeBtn = document.createElement('button');
@@ -781,6 +806,9 @@ function renderEditorMarkers() {
       renderEditorMarkers();
       updateEditorInstruction();
     });
+
+    el.appendChild(dot);
+    el.appendChild(lbl);
     el.appendChild(removeBtn);
 
     // Click per selezionare (solo se non si stava trascinando)
@@ -798,7 +826,7 @@ function renderEditorMarkers() {
       if (e.target.closest('.editor-marker-remove')) return;
       e.preventDefault();
       e.stopPropagation();
-      const img  = document.getElementById('editor-img');
+      const img  = document.getElementById('floorplan-img');
       const rect = img.getBoundingClientRect();
       const cx   = (e.clientX - rect.left) / rect.width;
       const cy   = (e.clientY - rect.top)  / rect.height;
@@ -824,8 +852,7 @@ async function savePositions() {
       body:    JSON.stringify(editorPos),
     });
     positions = { ...editorPos };
-    renderMarkers();
-    closeEditor();
+    closeEditor();   // chiama renderMarkers() internamente
   } catch {
     btn.textContent = '✕ Errore — riprova';
     btn.disabled    = false;
@@ -1084,8 +1111,6 @@ async function uploadFloorplan() {
       // Forza reload immagine aggiungendo timestamp al src
       const ts = Date.now();
       document.getElementById('settings-floorplan-preview').src = `/api/floorplan?t=${ts}`;
-      document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
-      document.getElementById('editor-img').src                 = `/api/floorplan?t=${ts}`;
       document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
     } else {
       setSettingsResult('floorplan-upload-result', `✕ ${data.error}`, false);

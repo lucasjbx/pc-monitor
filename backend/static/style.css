@@ -299,8 +299,8 @@ body {
 .btn-bulk-sd  { background: #dc2626; color: #fff; }
 
 /* Markers */
-#markers, #editor-markers { position: absolute; inset: 0; pointer-events: none; }
-#markers .marker, #editor-markers .editor-marker { pointer-events: all; }
+#markers { position: absolute; inset: 0; pointer-events: none; }
+#markers .marker { pointer-events: all; }
 
 .marker {
   position: absolute;
@@ -423,7 +423,79 @@ body {
 .btn-shutdown-no:hover { background: #eee; }
 .panel-note { font-size: 12px; color: #bbb; line-height: 1.5; }
 
-/* Editor posizioni */
+/* ── Editor posizioni (pannello inline) ─────────────────────────────────────── */
+
+/* Pannello fisso a destra durante editing */
+.editor-panel {
+  position: fixed; top: 56px; right: 0; bottom: 0; z-index: 300;
+  width: 230px; background: #fff; border-left: 1px solid #e5e5e3;
+  display: flex; flex-direction: column;
+  box-shadow: -4px 0 18px rgba(0,0,0,.12);
+}
+.editor-panel.hidden { display: none; }
+.editor-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 12px 10px; border-bottom: 1px solid #eee;
+  flex-shrink: 0;
+}
+.editor-panel-header h2 { font-size: 14px; font-weight: 500; }
+.editor-instruction {
+  padding: 8px 12px; font-size: .78rem; color: #666;
+  background: #f9f9f7; border-bottom: 1px solid #eee;
+  min-height: 36px; display: flex; align-items: center;
+  flex-shrink: 0;
+}
+.editor-instruction.active { color: #b45309; font-weight: 500; }
+.editor-panel-footer {
+  padding: 12px; border-top: 1px solid #eee; flex-shrink: 0;
+}
+.editor-panel-footer .btn-save { width: 100%; }
+
+/* Nasconde il pannello PC list mentre l'editor è aperto */
+body.editing #pc-list-panel { display: none; }
+
+/* Edit mode: #markers diventa interattivo */
+body.editing #markers { pointer-events: all; }
+
+/* Marker in modalità edit: aspetto pill blu con hostname */
+body.editing .marker.edit-mode {
+  cursor: grab; z-index: 10;
+}
+body.editing .marker.edit-mode .marker-dot { display: none; }
+body.editing .marker.edit-mode .marker-label {
+  opacity: 1;
+  background: rgba(59,130,246,.88);
+  border: 1.5px solid rgba(255,255,255,.45);
+  pointer-events: none;
+  margin-top: 0;
+}
+body.editing .marker.edit-mode.edit-selected .marker-label {
+  background: #f59e0b;
+  border-color: #fff;
+}
+body.editing .marker.edit-mode.dragging {
+  cursor: grabbing; z-index: 30; opacity: .85;
+}
+body.editing .marker.edit-mode.dragging .marker-label {
+  box-shadow: 0 3px 12px rgba(0,0,0,.4);
+}
+/* Cursore crosshair sulla mappa in edit mode */
+body.editing #floorplan-wrapper { cursor: crosshair; }
+/* Ma grab quando si passa su un marker */
+body.editing #floorplan-wrapper .marker.edit-mode { cursor: grab; }
+
+/* Bottone × su ogni marker in edit mode */
+.editor-marker-remove {
+  display: none;
+  position: absolute; top: -7px; right: -7px;
+  width: 14px; height: 14px; line-height: 13px;
+  background: #ef4444; color: #fff; border: none;
+  border-radius: 50%; font-size: 11px; cursor: pointer;
+  text-align: center; padding: 0; font-weight: 700;
+}
+.marker.edit-mode:hover .editor-marker-remove { display: block; }
+
+/* Editor CSS riusato anche dal pannello Impostazioni */
 .editor-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.6);
   z-index: 200; display: flex; align-items: stretch;
@@ -436,47 +508,6 @@ body {
   flex: 1; display: flex; flex-direction: column;
   overflow: hidden; background: #1a1a1a;
 }
-.editor-instruction {
-  padding: 8px 16px; font-size: 13px; color: #aaa;
-  background: #111; text-align: center; min-height: 34px;
-  display: flex; align-items: center; justify-content: center;
-}
-.editor-instruction.active { color: #facc15; font-weight: 500; }
-
-.editor-image-wrapper {
-  flex: 1; overflow: auto;
-  /* Niente position:relative qui — lo gestisce .editor-image-frame */
-}
-/* Frame interno: si auto-dimensiona all'immagine come #floorplan-container in vista normale */
-.editor-image-frame {
-  position: relative;
-  width: 100%;
-}
-.editor-image-frame img {
-  width: 100%; height: auto; display: block; user-select: none;
-}
-.editor-image-frame img.crosshair { cursor: crosshair; }
-
-.editor-marker {
-  position: absolute; transform: translate(-50%, -50%);
-  background: rgba(59,130,246,.85); color: #fff;
-  font-size: 9px; font-weight: 600; padding: 2px 5px;
-  border-radius: 4px; white-space: nowrap; cursor: grab;
-  border: 1.5px solid rgba(255,255,255,.5); z-index: 10; user-select: none;
-}
-.editor-marker.active   { background: #f59e0b; border-color: #fff; z-index: 20; }
-.editor-marker.dragging { cursor: grabbing; opacity: .85; z-index: 30; box-shadow: 0 3px 12px rgba(0,0,0,.45); }
-
-.editor-marker-remove {
-  display: none;
-  position: absolute; top: -7px; right: -7px;
-  width: 14px; height: 14px; line-height: 13px;
-  background: #ef4444; color: #fff; border: none;
-  border-radius: 50%; font-size: 11px; cursor: pointer;
-  text-align: center; padding: 0; font-weight: 700;
-}
-.editor-marker:hover .editor-marker-remove { display: block; }
-
 .editor-sidebar {
   width: 220px; flex-shrink: 0;
   border-left: 1px solid #ddd;
@@ -534,7 +565,7 @@ body {
 }
 
 /* Evidenzia la mappa quando si trascina sopra */
-.editor-image-frame img.drop-target {
+#floorplan-img.drop-target {
   outline: 2px dashed #3b82f6;
   outline-offset: -2px;
 }
