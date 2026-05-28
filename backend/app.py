@@ -17,7 +17,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone, timedelta
 from functools import wraps
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory, Response
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -599,6 +599,27 @@ def shutdown_pc(hostname: str):
         return jsonify({"ok": True, "hostname": hostname})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/rdp/<hostname>", methods=["GET"])
+@require_auth
+def rdp_file(hostname: str):
+    """Genera e restituisce un file .rdp per aprire Remote Desktop sul PC indicato."""
+    cfg = get_cfg()
+    pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    if not pc.get("ip"):
+        return jsonify({"error": "IP non disponibile"}), 400
+    content = (
+        f"full address:s:{pc['ip']}\r\n"
+        f"prompt for credentials:i:1\r\n"
+        f"administrative session:i:1\r\n"
+    )
+    return Response(
+        content,
+        mimetype="application/rdp",
+        headers={"Content-Disposition": f'attachment; filename="{hostname}.rdp"'}
+    )
 
 
 @app.route("/api/ping/<hostname>", methods=["GET"])

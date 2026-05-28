@@ -562,13 +562,7 @@ function renderPanelActions(pc) {
     const btn = document.createElement('button');
     btn.className   = 'btn-action rdp';
     btn.textContent = '🖥 Remote Desktop';
-    btn.addEventListener('click', () => {
-      // window.location.href all'interno di un gestore click (gesto utente diretto)
-      // è l'approccio più affidabile per i protocolli custom: il browser lancia
-      // l'app registrata senza navigare la pagina. Se il protocollo non è registrato
-      // il browser non fa nulla oppure mostra about:blank#blocked.
-      window.location.href = `rdp://full%20address=s:${pc.ip}`;
-    });
+    btn.addEventListener('click', () => doRdp(pc.hostname));
     container.appendChild(btn);
   }
 
@@ -602,6 +596,24 @@ async function doWol(hostname) {
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
+async function doRdp(hostname) {
+  // Scarica il file .rdp tramite apiFetch (gestisce X-Api-Key) e lo apre
+  // automaticamente tramite un link temporaneo — l'OS lo apre con mstsc / MSRD
+  try {
+    const res = await apiFetch(`/api/rdp/${hostname}`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${hostname}.rdp`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch {}
+}
+
 async function doShutdown(hostname) {
   shutdownStatus[hostname] = 'sending';
   refreshPanelIfOpen(hostname);
