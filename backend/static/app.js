@@ -563,13 +563,11 @@ function renderPanelActions(pc) {
     btn.className   = 'btn-action rdp';
     btn.textContent = '🖥 Remote Desktop';
     btn.addEventListener('click', () => {
-      // Iframe nascosto: apre il protocollo rdp:// senza navigare la pagina corrente
-      // (evita il blocco about:blank#blocked di Chrome sui protocolli custom)
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = `rdp://full%20address=s:${pc.ip}`;
-      document.body.appendChild(iframe);
-      setTimeout(() => document.body.removeChild(iframe), 2000);
+      // window.location.href all'interno di un gestore click (gesto utente diretto)
+      // è l'approccio più affidabile per i protocolli custom: il browser lancia
+      // l'app registrata senza navigare la pagina. Se il protocollo non è registrato
+      // il browser non fa nulla oppure mostra about:blank#blocked.
+      window.location.href = `rdp://full%20address=s:${pc.ip}`;
     });
     container.appendChild(btn);
   }
