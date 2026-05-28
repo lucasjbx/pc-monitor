@@ -324,9 +324,13 @@ body {
 .marker.unknown .marker-dot { background: #9ca3af; }
 
 .marker-label {
+  /* position: absolute rende il label fuori dal flusso → il marker ha altezza = solo il dot
+     → translate(-50%,-50%) ancora esattamente sul centro del dot, non sul centro del testo */
+  position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%);
+  width: max-content;
   display: flex; flex-direction: column; align-items: center;
   background: rgba(0,0,0,.75); color: #fff;
-  border-radius: 4px; padding: 2px 6px; margin-top: 3px;
+  border-radius: 4px; padding: 2px 6px;
   white-space: nowrap; font-size: 10px;
   opacity: 0; pointer-events: none; transition: opacity .15s;
 }
@@ -423,77 +427,110 @@ body {
 .btn-shutdown-no:hover { background: #eee; }
 .panel-note { font-size: 12px; color: #bbb; line-height: 1.5; }
 
-/* ── Editor posizioni (pannello inline) ─────────────────────────────────────── */
+/* ── Editor posizioni (full-screen modal) ─────────────────────────────────── */
 
-/* Pannello fisso a destra durante editing */
-.editor-panel {
-  position: fixed; top: 56px; right: 0; bottom: 0; z-index: 300;
-  width: 230px; background: #fff; border-left: 1px solid #e5e5e3;
+/* Area mappa dell'editor */
+.editor-map-area {
+  flex: 1; min-width: 0;
   display: flex; flex-direction: column;
-  box-shadow: -4px 0 18px rgba(0,0,0,.12);
+  background: #111; overflow: hidden;
 }
-.editor-panel.hidden { display: none; }
-.editor-panel-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 12px 10px; border-bottom: 1px solid #eee;
-  flex-shrink: 0;
-}
-.editor-panel-header h2 { font-size: 14px; font-weight: 500; }
-.editor-instruction {
-  padding: 8px 12px; font-size: .78rem; color: #666;
-  background: #f9f9f7; border-bottom: 1px solid #eee;
-  min-height: 36px; display: flex; align-items: center;
-  flex-shrink: 0;
-}
-.editor-instruction.active { color: #b45309; font-weight: 500; }
-.editor-panel-footer {
-  padding: 12px; border-top: 1px solid #eee; flex-shrink: 0;
-}
-.editor-panel-footer .btn-save { width: 100%; }
 
-/* Nasconde il pannello PC list mentre l'editor è aperto */
-body.editing #pc-list-panel { display: none; }
+/* Toolbar */
+.editor-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; height: 46px;
+  background: #1a1a1a; border-bottom: 1px solid #333; flex-shrink: 0;
+}
+.editor-toolbar-left  { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.editor-toolbar-right { display: flex; align-items: center; gap: 8px;  flex-shrink: 0; }
+.editor-instruction-bar {
+  flex: 1; text-align: center; font-size: 12px; color: #888;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.editor-instruction-bar.active { color: #f59e0b; font-weight: 500; }
+.editor-mode-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  background: #f59e0b; color: #111; padding: 3px 8px; border-radius: 4px; flex-shrink: 0;
+}
+.editor-counter { font-size: 12px; color: #aaa; }
+.editor-counter .count-placed { color: #22c55e; font-weight: 600; }
+.btn-editor-save {
+  padding: 6px 16px; background: #16a34a; color: #fff;
+  border: none; border-radius: 7px; font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: opacity .15s;
+}
+.btn-editor-save:hover:not(:disabled) { opacity: .85; }
+.btn-editor-save:disabled { opacity: .5; cursor: wait; }
+.btn-editor-cancel {
+  padding: 6px 14px; background: transparent; color: #aaa;
+  border: 1px solid #444; border-radius: 7px; font-size: 12px;
+  cursor: pointer; transition: background .15s, color .15s;
+}
+.btn-editor-cancel:hover { background: #2a2a2a; color: #eee; }
 
-/* Edit mode: #markers diventa interattivo */
-body.editing #markers { pointer-events: all; }
+/* Wrapper mappa editor */
+.editor-floorplan-wrapper {
+  flex: 1; min-height: 0; position: relative;
+  overflow: hidden; background: #1a1a1a;
+}
+.editor-floorplan-wrapper.placing { cursor: crosshair; }
+#editor-floorplan-img.drop-target { outline: 2px dashed #3b82f6; outline-offset: -2px; }
+#editor-markers { position: absolute; inset: 0; pointer-events: none; }
+#editor-markers .editor-mk { pointer-events: all; }
 
-/* Marker in modalità edit: aspetto pill blu con hostname */
-body.editing .marker.edit-mode {
-  cursor: grab; z-index: 10;
+/* Marker editor: cerchio numerato + hostname */
+.editor-mk {
+  position: absolute; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center;
+  cursor: grab; z-index: 10; user-select: none;
 }
-body.editing .marker.edit-mode .marker-dot { display: none; }
-body.editing .marker.edit-mode .marker-label {
-  opacity: 1;
-  background: rgba(59,130,246,.88);
-  border: 1.5px solid rgba(255,255,255,.45);
-  pointer-events: none;
-  margin-top: 0;
+.editor-mk:hover, .editor-mk.edit-selected { z-index: 20; }
+.editor-mk.dragging { cursor: grabbing; z-index: 30; opacity: .85; }
+.editor-mk-dot {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(59,130,246,.9); border: 2px solid rgba(255,255,255,.7);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; color: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,.45); transition: transform .1s;
 }
-body.editing .marker.edit-mode.edit-selected .marker-label {
-  background: #f59e0b;
-  border-color: #fff;
+.editor-mk:hover .editor-mk-dot,
+.editor-mk.edit-selected .editor-mk-dot { transform: scale(1.25); }
+.editor-mk.edit-selected .editor-mk-dot { background: #f59e0b; border-color: #fff; }
+.editor-mk.dragging .editor-mk-dot { box-shadow: 0 4px 14px rgba(0,0,0,.55); }
+.editor-mk-label {
+  /* position: absolute → fuori dal flusso, stesso principio del .marker-label */
+  position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%);
+  width: max-content;
+  font-size: 9px; font-weight: 600; color: #fff;
+  background: rgba(0,0,0,.65); border-radius: 3px; padding: 1px 5px;
+  white-space: nowrap; pointer-events: none;
 }
-body.editing .marker.edit-mode.dragging {
-  cursor: grabbing; z-index: 30; opacity: .85;
-}
-body.editing .marker.edit-mode.dragging .marker-label {
-  box-shadow: 0 3px 12px rgba(0,0,0,.4);
-}
-/* Cursore crosshair sulla mappa in edit mode */
-body.editing #floorplan-wrapper { cursor: crosshair; }
-/* Ma grab quando si passa su un marker */
-body.editing #floorplan-wrapper .marker.edit-mode { cursor: grab; }
-
-/* Bottone × su ogni marker in edit mode */
-.editor-marker-remove {
-  display: none;
-  position: absolute; top: -7px; right: -7px;
+.editor-mk.edit-selected .editor-mk-label { background: rgba(245,158,11,.85); color: #111; }
+.editor-mk-remove {
+  display: none; position: absolute; top: -6px; right: -6px;
   width: 14px; height: 14px; line-height: 13px;
-  background: #ef4444; color: #fff; border: none;
-  border-radius: 50%; font-size: 11px; cursor: pointer;
-  text-align: center; padding: 0; font-weight: 700;
+  background: #ef4444; color: #fff; border: none; border-radius: 50%;
+  font-size: 10px; font-weight: 700; cursor: pointer; text-align: center; padding: 0;
 }
-.marker.edit-mode:hover .editor-marker-remove { display: block; }
+.editor-mk:hover .editor-mk-remove { display: block; }
+
+/* Sidebar editor (sovrascrive larghezza base) */
+.editor-pos-sidebar { width: 280px; }
+
+/* Search bar */
+.editor-search-bar { padding: 8px 10px; border-bottom: 1px solid #f0f0ee; flex-shrink: 0; }
+.editor-search-input {
+  width: 100%; padding: 6px 10px; font-size: 12px;
+  border: 1px solid #d0d0ce; border-radius: 6px; color: #111; outline: none;
+  box-sizing: border-box;
+}
+.editor-search-input:focus { border-color: #999; }
+
+/* Bottone annulla in sidebar */
+.btn-editor-cancel-alt {
+  width: 100%; text-align: center; font-size: 12px; color: #666;
+}
 
 /* Editor CSS riusato anche dal pannello Impostazioni */
 .editor-overlay {
@@ -533,19 +570,30 @@ body.editing #floorplan-wrapper .marker.edit-mode { cursor: grab; }
 .editor-count.ok { background: rgba(34,197,94,.15); color: #16a34a; }
 
 .editor-pc-item {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 5px 12px; font-size: 12px; cursor: pointer; color: #111;
-  transition: background .1s;
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 14px; font-size: 12px; cursor: pointer; color: #111;
+  transition: background .1s; user-select: none;
 }
-.editor-pc-item:hover { background: #f5f5f5; }
-.editor-pc-item.active { background: rgba(245,158,11,.12); color: #b45309; font-weight: 600; }
-.editor-pc-item.placed { color: #555; }
+.editor-pc-item:hover { background: #f5f5f3; }
+.editor-pc-status {
+  width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700;
+}
+.editor-pc-status.unplaced { border: 1.5px solid #ccc; }
+.editor-pc-status.placed   { background: rgba(34,197,94,.15); border: 1.5px solid #16a34a; color: #15803d; }
+.editor-pc-item.active .editor-pc-status { background: rgba(245,158,11,.15); border-color: #f59e0b; color: #b45309; }
+.editor-pc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-pc-item.active .editor-pc-name { color: #b45309; font-weight: 600; }
+.editor-pc-item.placed .editor-pc-name { color: #555; }
 
 .editor-remove {
   background: none; border: none; cursor: pointer;
   color: #ccc; font-size: 15px; padding: 0 2px; line-height: 1; border-radius: 3px;
+  opacity: 0; transition: opacity .1s; flex-shrink: 0;
 }
-.editor-remove:hover { color: #c0392b; background: rgba(192,57,43,.08); }
+.editor-pc-item:hover .editor-remove { opacity: 1; }
+.editor-remove:hover { color: #ef4444 !important; background: rgba(239,68,68,.08); }
 
 /* Drag dalla lista: cursore grab sui PC non posizionati */
 .editor-pc-item:not(.placed) { cursor: grab; }
@@ -571,7 +619,8 @@ body.editing #floorplan-wrapper .marker.edit-mode { cursor: grab; }
 }
 
 .editor-footer {
-  padding: 12px; border-top: 1px solid #eee;
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 12px; border-top: 1px solid #eee; flex-shrink: 0;
 }
 .btn-save {
   width: 100%; padding: 9px; background: #111; color: #fff;

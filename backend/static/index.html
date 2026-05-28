@@ -128,16 +128,59 @@
     <div id="panel-actions"></div>
   </div>
 
-  <!-- Editor posizioni (pannello fisso sulla destra, sovrapposto alla mappa) -->
-  <div id="editor-panel" class="editor-panel hidden">
-    <div class="editor-panel-header">
-      <h2>Posizioni PC</h2>
-      <button class="panel-close" id="btn-editor-close">✕</button>
-    </div>
-    <div id="editor-instruction" class="editor-instruction"></div>
-    <div id="editor-pc-list" class="editor-pc-list"></div>
-    <div class="editor-panel-footer">
-      <button id="btn-save-positions" class="btn-save">Salva</button>
+  <!-- Editor posizioni (full-screen modal) -->
+  <div id="editor-overlay" class="editor-overlay hidden">
+    <div class="editor-container">
+
+      <!-- Area mappa (flex:1) -->
+      <div class="editor-map-area">
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span class="editor-mode-badge">MODALITÀ MODIFICA</span>
+            <span id="editor-counter" class="editor-counter">0 / 0 posizionati</span>
+          </div>
+          <div id="editor-instruction-bar" class="editor-instruction-bar">
+            Seleziona un PC dalla lista per posizionarlo
+          </div>
+          <div class="editor-toolbar-right">
+            <button id="btn-editor-save"   class="btn-editor-save">Salva</button>
+            <button id="btn-editor-cancel" class="btn-editor-cancel">Annulla</button>
+          </div>
+        </div>
+
+        <div id="editor-floorplan-wrapper" class="editor-floorplan-wrapper">
+          <div class="floorplan-zoom-controls">
+            <button class="zoom-btn" id="btn-editor-zoom-in"    title="Zoom in">+</button>
+            <button class="zoom-btn" id="btn-editor-zoom-out"   title="Zoom out">−</button>
+            <button class="zoom-btn" id="btn-editor-zoom-reset" title="Reset zoom">⊙</button>
+            <span class="zoom-badge" id="editor-zoom-badge">100%</span>
+          </div>
+          <div id="editor-floorplan-scaler" class="floorplan-scaler">
+            <div id="editor-floorplan-container" class="floorplan-container">
+              <img id="editor-floorplan-img" src="/api/floorplan"
+                   alt="Piantina" draggable="false">
+              <div id="editor-markers"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar destra (280px) -->
+      <div class="editor-sidebar editor-pos-sidebar">
+        <div class="editor-sidebar-header">
+          <h2>Elenco PC</h2>
+        </div>
+        <div class="editor-search-bar">
+          <input type="text" id="editor-search" class="editor-search-input"
+                 placeholder="Cerca hostname…" autocomplete="off">
+        </div>
+        <div id="editor-pc-list" class="editor-pc-list"></div>
+        <div class="editor-footer">
+          <button id="btn-editor-save-2"   class="btn-save">Salva</button>
+          <button id="btn-editor-cancel-2" class="btn btn-editor-cancel-alt">Annulla</button>
+        </div>
+      </div>
+
     </div>
   </div>
 

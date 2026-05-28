@@ -26,6 +26,13 @@ let panX = 0;
 let panY = 0;
 let _pan = null;   // { startX, startY, startPanX, startPanY }
 
+// Stato zoom editor (indipendente dalla mappa normale)
+let editorZoom  = 1.0;
+let editorPanX  = 0;
+let editorPanY  = 0;
+let _editorPan  = null;   // { startX, startY, startPanX, startPanY }
+let editorSearchQuery = '';
+
 // Stato pannello PC list
 let selectedPCs   = new Set();
 let listCollapsed = localStorage.getItem('pcListCollapsed') === '1';
@@ -138,11 +145,52 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Panel PC
   document.getElementById('btn-panel-close').addEventListener('click', closePanel);
 
-  // Editor posizioni
-  document.getElementById('btn-editor-close').addEventListener('click', closeEditor);
-  document.getElementById('btn-save-positions').addEventListener('click', savePositions);
+  // Editor posizioni (full-screen)
+  document.getElementById('btn-editor-cancel').addEventListener('click', closeEditor);
+  document.getElementById('btn-editor-cancel-2').addEventListener('click', closeEditor);
+  document.getElementById('btn-editor-save').addEventListener('click', savePositions);
+  document.getElementById('btn-editor-save-2').addEventListener('click', savePositions);
+  document.getElementById('editor-search').addEventListener('input', e => {
+    editorSearchQuery = e.target.value.toLowerCase();
+    renderEditorSidebar();
+  });
   document.getElementById('editor-pc-list').addEventListener('click', handleEditorListClick);
   document.getElementById('editor-pc-list').addEventListener('mousedown', handleEditorListMousedown);
+
+  // Zoom editor
+  document.getElementById('btn-editor-zoom-in').addEventListener('click',    () => changeEditorZoom(1.25));
+  document.getElementById('btn-editor-zoom-out').addEventListener('click',   () => changeEditorZoom(0.8));
+  document.getElementById('btn-editor-zoom-reset').addEventListener('click', resetEditorZoom);
+
+  document.getElementById('editor-floorplan-scaler').addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor  = e.deltaY < 0 ? 1.1 : 0.9;
+    const newZoom = Math.max(0.5, Math.min(4, editorZoom * factor));
+    const wrapper = document.getElementById('editor-floorplan-wrapper');
+    const rect    = wrapper.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const px = (mx - editorPanX) / editorZoom;
+    const py = (my - editorPanY) / editorZoom;
+    editorPanX = mx - px * newZoom;
+    editorPanY = my - py * newZoom;
+    editorZoom = newZoom;
+    applyEditorTransform();
+  }, { passive: false });
+
+  // Pan editor — drag sulla piantina editor (mousedown+move=pan, click=piazza PC)
+  document.getElementById('editor-floorplan-wrapper').addEventListener('mousedown', e => {
+    if (e.target.closest('.editor-mk') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
+    e.preventDefault();
+    const edScaler = document.getElementById('editor-floorplan-scaler');
+    _editorPan = { startX: e.clientX, startY: e.clientY, startPanX: editorPanX, startPanY: editorPanY };
+    edScaler.classList.add('panning');
+  });
+
+  // Escape chiude l'editor
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && editingMode) closeEditor();
+  });
 
   // Drag editor + pan mappa — mousemove/mouseup globali
   document.addEventListener('mousemove', e => {
@@ -161,22 +209,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (_sidebarDrag.ghostEl) {
         _sidebarDrag.ghostEl.style.left = `${e.clientX}px`;
         _sidebarDrag.ghostEl.style.top  = `${e.clientY}px`;
-        const img  = document.getElementById('floorplan-img');
-        const rect = img.getBoundingClientRect();
-        const over = e.clientX >= rect.left && e.clientX <= rect.right &&
-                     e.clientY >= rect.top  && e.clientY <= rect.bottom;
+        // In editor: usa l'immagine editor; in normale: usa floorplan-img
+        const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+        const img   = document.getElementById(imgId);
+        const rect  = img.getBoundingClientRect();
+        const over  = e.clientX >= rect.left && e.clientX <= rect.right &&
+                      e.clientY >= rect.top  && e.clientY <= rect.bottom;
         img.classList.toggle('drop-target', over);
       }
     } else if (_drag) {
-      const img  = document.getElementById('floorplan-img');
-      const rect = img.getBoundingClientRect();
-      const cx   = (e.clientX - rect.left) / rect.width;
-      const cy   = (e.clientY - rect.top)  / rect.height;
-      const x    = Math.max(0, Math.min(1, cx - _drag.offsetX));
-      const y    = Math.max(0, Math.min(1, cy - _drag.offsetY));
-      _drag.el.style.left = `${x * 100}%`;   // percentuale — identica alla vista normale
+      // Drag marker: usa l'immagine editor in editingMode
+      const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+      const img   = document.getElementById(imgId);
+      const rect  = img.getBoundingClientRect();
+      const cx    = (e.clientX - rect.left) / rect.width;
+      const cy    = (e.clientY - rect.top)  / rect.height;
+      const x     = Math.max(0, Math.min(1, cx - _drag.offsetX));
+      const y     = Math.max(0, Math.min(1, cy - _drag.offsetY));
+      _drag.el.style.left = `${x * 100}%`;
       _drag.el.style.top  = `${y * 100}%`;
       editorPos[_drag.hostname] = { x, y };
+    } else if (_editorPan) {
+      editorPanX = _editorPan.startPanX + (e.clientX - _editorPan.startX);
+      editorPanY = _editorPan.startPanY + (e.clientY - _editorPan.startY);
+      applyEditorTransform();
     } else if (_pan) {
       panX = _pan.startPanX + (e.clientX - _pan.startX);
       panY = _pan.startPanY + (e.clientY - _pan.startY);
@@ -185,7 +241,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.addEventListener('mouseup', e => {
     if (_sidebarDrag) {
-      const img = document.getElementById('floorplan-img');
+      // In editor: usa immagine editor; in normale: usa floorplan-img
+      const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+      const img   = document.getElementById(imgId);
       img.classList.remove('drop-target');
       if (_sidebarDrag.ghostEl) {
         // Rilascio dopo drag effettivo
@@ -217,6 +275,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       _drag = null;
       renderEditorMarkers();
       renderEditorSidebar();
+    }
+    if (_editorPan) {
+      _editorPan = null;
+      document.getElementById('editor-floorplan-scaler').classList.remove('panning');
     }
     if (_pan) {
       _pan = null;
@@ -640,28 +702,32 @@ function refreshPanelIfOpen(hostname) {
 // ── Editor posizioni ──────────────────────────────────────────────────────────
 
 function openEditor() {
-  editorPos      = { ...positions };
-  editorSelected = null;
-  editingMode    = true;
+  editorPos         = { ...positions };
+  editorSelected    = null;
+  editingMode       = true;
+  editorSearchQuery = '';
 
   // Chiudi pannello PC se aperto
   closePanel();
 
-  // Resetta zoom/pan per avere coordinate lineari (getBoundingClientRect preciso)
-  resetZoom();
+  // Resetta zoom/pan dell'editor
+  resetEditorZoom();
 
-  // Mostra pannello editor e attiva modalità editing sulla mappa
-  document.getElementById('editor-panel').classList.remove('hidden');
-  document.body.classList.add('editing');
+  // Mostra overlay full-screen
+  document.getElementById('editor-overlay').classList.remove('hidden');
 
-  // Resetta bottone salva
-  const saveBtn = document.getElementById('btn-save-positions');
-  saveBtn.disabled    = false;
-  saveBtn.textContent = 'Salva';
+  // Resetta search
+  document.getElementById('editor-search').value = '';
 
-  // Registra listener click-to-place sul container della mappa
+  // Resetta bottoni salva
+  const s1 = document.getElementById('btn-editor-save');
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s1) { s1.disabled = false; s1.textContent = 'Salva'; }
+  if (s2) { s2.disabled = false; }
+
+  // Registra listener click-to-place sul container della mappa editor
   _editorClickHandler = handleEditorClick;
-  document.getElementById('floorplan-container').addEventListener('click', _editorClickHandler);
+  document.getElementById('editor-floorplan-container').addEventListener('click', _editorClickHandler);
 
   renderEditorMarkers();
   renderEditorSidebar();
@@ -669,15 +735,17 @@ function openEditor() {
 }
 
 function closeEditor() {
-  if (_drag) { _drag.el.classList.remove('dragging'); _drag = null; }
+  if (_drag) { if (_drag.el) _drag.el.classList.remove('dragging'); _drag = null; }
+  if (_sidebarDrag) { if (_sidebarDrag.ghostEl) _sidebarDrag.ghostEl.remove(); _sidebarDrag = null; }
+  if (_editorPan) { _editorPan = null; }
 
   editingMode = false;
-  document.body.classList.remove('editing');
-  document.getElementById('editor-panel').classList.add('hidden');
+  document.getElementById('editor-overlay').classList.add('hidden');
 
-  // Rimuovi listener click-to-place
+  // Rimuovi listener click-to-place dall'editor
   if (_editorClickHandler) {
-    document.getElementById('floorplan-container').removeEventListener('click', _editorClickHandler);
+    const cont = document.getElementById('editor-floorplan-container');
+    if (cont) cont.removeEventListener('click', _editorClickHandler);
     _editorClickHandler = null;
   }
 
@@ -687,10 +755,10 @@ function closeEditor() {
 
 function handleEditorClick(e) {
   if (!editingMode || !editorSelected) return;
-  // Click su marker → selezione (gestita dal listener del marker stesso), non piazzamento
-  if (e.target.closest('.marker')) return;
+  // Click su marker editor → selezione (gestita dal listener del marker stesso), non piazzamento
+  if (e.target.closest('.editor-mk')) return;
 
-  const img  = document.getElementById('floorplan-img');
+  const img  = document.getElementById('editor-floorplan-img');
   const rect = img.getBoundingClientRect();
   const x    = (e.clientX - rect.left) / rect.width;
   const y    = (e.clientY - rect.top)  / rect.height;
@@ -698,6 +766,7 @@ function handleEditorClick(e) {
 
   editorPos[editorSelected] = { x, y };
 
+  // Auto-seleziona il prossimo PC non posizionato
   const unplaced = pcs.map(p => p.hostname).filter(h => !editorPos[h] && h !== editorSelected);
   editorSelected = unplaced[0] || null;
 
@@ -734,69 +803,88 @@ function handleEditorListMousedown(e) {
 }
 
 function updateEditorInstruction() {
-  const el = document.getElementById('editor-instruction');
+  const bar     = document.getElementById('editor-instruction-bar');
+  const wrapper = document.getElementById('editor-floorplan-wrapper');
+  if (!bar) return;
+
   if (editorSelected && !editorPos[editorSelected]) {
-    el.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
-    el.className   = 'editor-instruction active';
+    bar.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
+    bar.classList.add('active');
+    if (wrapper) wrapper.classList.add('placing');
   } else {
-    el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
-    el.className   = 'editor-instruction';
+    bar.textContent = 'Seleziona un PC dalla lista, poi clicca sulla mappa — oppure trascinalo direttamente';
+    bar.classList.remove('active');
+    if (wrapper) wrapper.classList.remove('placing');
   }
 }
 
 function renderEditorSidebar() {
-  const allHosts = pcs.map(p => p.hostname);
-  const placed   = allHosts.filter(h =>  editorPos[h]);
-  const unplaced = allHosts.filter(h => !editorPos[h]);
+  const allHosts   = pcs.map(p => p.hostname);
+  const query      = editorSearchQuery.trim().toLowerCase();
+  const filtered   = query ? allHosts.filter(h => h.toLowerCase().includes(query)) : allHosts;
+  const placedAll  = allHosts.filter(h => editorPos[h]).length;   // contatore totale (non filtrato)
+  const unplaced   = filtered.filter(h => !editorPos[h]);
+  const placed     = filtered.filter(h =>  editorPos[h]);
 
   let html = '';
-  if (unplaced.length > 0) {
-    html += `<div class="editor-section-title">Da posizionare <span class="editor-count">${unplaced.length}</span></div>`;
-    for (const h of unplaced) {
-      html += `<div class="editor-pc-item${editorSelected === h ? ' active' : ''}" data-hostname="${h}">${h}</div>`;
-    }
+  for (const h of unplaced) {
+    const isActive = editorSelected === h;
+    html += `<div class="editor-pc-item${isActive ? ' active' : ''}" data-hostname="${escHtml(h)}">
+      <div class="editor-pc-status unplaced"></div>
+      <span class="editor-pc-name">${escHtml(h)}</span>
+    </div>`;
   }
-  if (placed.length > 0) {
-    html += `<div class="editor-section-title" style="margin-top:8px">Posizionati <span class="editor-count ok">${placed.length}</span></div>`;
-    for (const h of placed) {
-      html += `<div class="editor-pc-item placed${editorSelected === h ? ' active' : ''}" data-hostname="${h}">
-                 <span>${h}</span>
-                 <button class="editor-remove" data-hostname="${h}">×</button>
-               </div>`;
-    }
+  for (const h of placed) {
+    const isActive = editorSelected === h;
+    html += `<div class="editor-pc-item placed${isActive ? ' active' : ''}" data-hostname="${escHtml(h)}">
+      <div class="editor-pc-status placed">✓</div>
+      <span class="editor-pc-name">${escHtml(h)}</span>
+      <button class="editor-remove" data-hostname="${escHtml(h)}">×</button>
+    </div>`;
   }
 
   document.getElementById('editor-pc-list').innerHTML = html;
-  document.getElementById('btn-save-positions').textContent = `Salva (${placed.length} PC)`;
+
+  // Aggiorna contatore nella toolbar
+  const counter = document.getElementById('editor-counter');
+  if (counter) {
+    counter.innerHTML = `<span class="count-placed">${placedAll}</span> / ${allHosts.length} posizionati`;
+  }
+
+  // Aggiorna testo bottoni salva
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s2 && !s2.disabled) s2.textContent = `Salva (${placedAll} PC)`;
 }
 
 function renderEditorMarkers() {
-  // Usa lo stesso #markers e le stesse percentuali CSS della vista normale →
-  // offset impossibile per costruzione (stesso elemento DOM, stesso sistema di coordinate).
-  const container = document.getElementById('markers');
+  // Usa #editor-markers e #editor-floorplan-img — DOM completamente separato dalla vista normale.
+  // Coordinate in percentuale (0-1) → offset impossibile per costruzione.
+  const container = document.getElementById('editor-markers');
+  if (!container) return;
   container.innerHTML = '';
 
-  for (const [hostname, pos] of Object.entries(editorPos)) {
-    const sel = editorSelected === hostname ? ' edit-selected' : '';
+  const entries = Object.entries(editorPos);
+  entries.forEach(([hostname, pos], idx) => {
+    const sel = editorSelected === hostname;
     const el  = document.createElement('div');
-    el.className        = `marker edit-mode${sel}`;
-    el.style.left       = `${pos.x * 100}%`;   // percentuale identica alla vista normale
+    el.className        = `editor-mk${sel ? ' edit-selected' : ''}`;
+    el.style.left       = `${pos.x * 100}%`;
     el.style.top        = `${pos.y * 100}%`;
     el.dataset.hostname = hostname;
 
+    // Cerchio numerato
     const dot = document.createElement('div');
-    dot.className = 'marker-dot';
+    dot.className   = 'editor-mk-dot';
+    dot.textContent = idx + 1;   // numero 1-based nella lista dei posizionati
 
+    // Etichetta hostname
     const lbl = document.createElement('div');
-    lbl.className = 'marker-label';
-    const hn = document.createElement('span');
-    hn.className   = 'marker-hostname';
-    hn.textContent = hostname;
-    lbl.appendChild(hn);
+    lbl.className   = 'editor-mk-label';
+    lbl.textContent = hostname;
 
     // Bottone × per rimozione diretta dalla mappa
     const removeBtn = document.createElement('button');
-    removeBtn.className   = 'editor-marker-remove';
+    removeBtn.className   = 'editor-mk-remove';
     removeBtn.textContent = '×';
     removeBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -823,10 +911,10 @@ function renderEditorMarkers() {
 
     // Drag start — salva offset cursore/centro per evitare "salto"
     el.addEventListener('mousedown', e => {
-      if (e.target.closest('.editor-marker-remove')) return;
+      if (e.target.closest('.editor-mk-remove')) return;
       e.preventDefault();
       e.stopPropagation();
-      const img  = document.getElementById('floorplan-img');
+      const img  = document.getElementById('editor-floorplan-img');
       const rect = img.getBoundingClientRect();
       const cx   = (e.clientX - rect.left) / rect.width;
       const cy   = (e.clientY - rect.top)  / rect.height;
@@ -838,13 +926,14 @@ function renderEditorMarkers() {
     });
 
     container.appendChild(el);
-  }
+  });
 }
 
 async function savePositions() {
-  const btn = document.getElementById('btn-save-positions');
-  btn.textContent = 'Salvataggio…';
-  btn.disabled    = true;
+  const s1 = document.getElementById('btn-editor-save');
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s1) { s1.textContent = 'Salvataggio…'; s1.disabled = true; }
+  if (s2) { s2.textContent = 'Salvataggio…'; s2.disabled = true; }
   try {
     await apiFetch('/api/positions', {
       method:  'POST',
@@ -854,8 +943,8 @@ async function savePositions() {
     positions = { ...editorPos };
     closeEditor();   // chiama renderMarkers() internamente
   } catch {
-    btn.textContent = '✕ Errore — riprova';
-    btn.disabled    = false;
+    if (s1) { s1.textContent = '✕ Errore'; s1.disabled = false; }
+    if (s2) { s2.textContent = '✕ Errore — riprova'; s2.disabled = false; }
   }
 }
 
@@ -1112,6 +1201,7 @@ async function uploadFloorplan() {
       const ts = Date.now();
       document.getElementById('settings-floorplan-preview').src = `/api/floorplan?t=${ts}`;
       document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
+      document.getElementById('editor-floorplan-img').src       = `/api/floorplan?t=${ts}`;
     } else {
       setSettingsResult('floorplan-upload-result', `✕ ${data.error}`, false);
     }
@@ -1150,6 +1240,35 @@ function changeZoom(factor) {
 function resetZoom() {
   zoom = 1; panX = 0; panY = 0;
   applyTransform();
+}
+
+// ── Zoom mappa editor (indipendente) ─────────────────────────────────────────
+function applyEditorTransform() {
+  const scaler = document.getElementById('editor-floorplan-scaler');
+  if (!scaler) return;
+  scaler.style.transform = `translate(${editorPanX}px, ${editorPanY}px) scale(${editorZoom})`;
+  const badge = document.getElementById('editor-zoom-badge');
+  if (badge) badge.textContent = `${Math.round(editorZoom * 100)}%`;
+}
+
+function changeEditorZoom(factor) {
+  const newZoom = Math.max(0.5, Math.min(4, editorZoom * factor));
+  const wrapper = document.getElementById('editor-floorplan-wrapper');
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const cx = rect.width  / 2;
+  const cy = rect.height / 2;
+  const px = (cx - editorPanX) / editorZoom;
+  const py = (cy - editorPanY) / editorZoom;
+  editorPanX = cx - px * newZoom;
+  editorPanY = cy - py * newZoom;
+  editorZoom = newZoom;
+  applyEditorTransform();
+}
+
+function resetEditorZoom() {
+  editorZoom = 1; editorPanX = 0; editorPanY = 0;
+  applyEditorTransform();
 }
 
 // ── Pannello PC list ──────────────────────────────────────────────────────────
