@@ -285,7 +285,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-rdp-download').addEventListener('click', downloadRdpSetup);
   document.getElementById('btn-rdp-open').addEventListener('click', () => {
     localStorage.setItem('rdpSetupDone', '1');
-    if (_rdpPendingIp) window.location.href = `rdp://full%20address=s:${_rdpPendingIp}`;
+    if (_rdpPendingIp) openRdpLink(_rdpPendingIp);
     closeRdpModal();
   });
   document.getElementById('btn-rdp-cancel').addEventListener('click', closeRdpModal);
@@ -573,7 +573,7 @@ function renderPanelActions(pc) {
     btn.textContent = '🖥 Remote Desktop';
     btn.addEventListener('click', () => {
       if (localStorage.getItem('rdpSetupDone')) {
-        window.location.href = `rdp://full%20address=s:${pc.ip}`;
+        openRdpLink(pc.ip);
       } else {
         showRdpModal(pc.ip);
       }
@@ -611,6 +611,17 @@ async function doWol(hostname) {
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
+// ── Remote Desktop ────────────────────────────────────────────────────────────
+function openRdpLink(ip) {
+  // window.location.href non accetta protocolli custom → usiamo <a> cliccato
+  // programmaticamente nel contesto di un gesto utente
+  const a = document.createElement('a');
+  a.href = `rdp://full%20address=s:${ip}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 // ── Modal setup Remote Desktop ────────────────────────────────────────────────
 let _rdpPendingIp = null;
 
