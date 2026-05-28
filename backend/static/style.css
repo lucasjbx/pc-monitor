@@ -689,28 +689,6 @@ body {
 }
 
 /* ── Login overlay ─────────────────────────────────────────────────────────── */
-/* Modal setup Remote Desktop */
-.rdp-modal {
-  position: fixed; inset: 0; z-index: 500;
-  background: rgba(0,0,0,.45);
-  display: flex; align-items: center; justify-content: center;
-}
-.rdp-modal.hidden { display: none; }
-.rdp-modal-box {
-  background: #fff; border: 1px solid #e5e5e3;
-  border-radius: 12px; padding: 24px 28px;
-  max-width: 400px; width: 90%;
-  box-shadow: 0 8px 32px rgba(0,0,0,.25);
-}
-.rdp-modal-box h3 { margin: 0 0 10px; font-size: .95rem; color: #111; }
-.rdp-modal-box p  { font-size: .83rem; color: #555; margin: 0 0 8px; }
-.rdp-modal-steps  { font-size: .83rem; color: #555; padding-left: 18px; margin: 0 0 10px; }
-.rdp-modal-steps li { margin-bottom: 3px; }
-.rdp-modal-hint   { font-size: .77rem; color: #555; }
-.rdp-modal-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
-.rdp-open-btn     { background: #2563eb !important; }
-.rdp-open-btn:hover { background: #1d4ed8 !important; }
-
 .login-overlay {
   position: fixed; inset: 0; z-index: 9000;
   background: rgba(0,0,0,.55);

@@ -281,15 +281,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
   });
 
-  // Modal setup Remote Desktop
-  document.getElementById('btn-rdp-download').addEventListener('click', downloadRdpSetup);
-  document.getElementById('btn-rdp-open').addEventListener('click', () => {
-    localStorage.setItem('rdpSetupDone', '1');
-    if (_rdpPendingIp) openRdpLink(_rdpPendingIp);
-    closeRdpModal();
-  });
-  document.getElementById('btn-rdp-cancel').addEventListener('click', closeRdpModal);
-
   // Update
   document.getElementById('update-badge').addEventListener('click', openUpdatePopover);
   document.getElementById('btn-apply-update').addEventListener('click', applyUpdate);
@@ -566,18 +557,12 @@ function renderPanelActions(pc) {
     }
   }
 
-  // Remote Desktop (solo se online e ha IP)
+  // Remote Desktop (solo se online e ha IP) — scarica file .rdp
   if (pc.online && pc.ip) {
     const btn = document.createElement('button');
     btn.className   = 'btn-action rdp';
     btn.textContent = '🖥 Remote Desktop';
-    btn.addEventListener('click', () => {
-      if (localStorage.getItem('rdpSetupDone')) {
-        openRdpLink(pc.ip);
-      } else {
-        showRdpModal(pc.ip);
-      }
-    });
+    btn.addEventListener('click', () => doRdp(pc.hostname));
     container.appendChild(btn);
   }
 
@@ -612,39 +597,16 @@ async function doWol(hostname) {
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
 // ── Remote Desktop ────────────────────────────────────────────────────────────
-function openRdpLink(ip) {
-  // window.location.href non accetta protocolli custom → usiamo <a> cliccato
-  // programmaticamente nel contesto di un gesto utente
-  const a = document.createElement('a');
-  a.href = `rdp://full%20address=s:${ip}`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-}
-
-// ── Modal setup Remote Desktop ────────────────────────────────────────────────
-let _rdpPendingIp = null;
-
-function showRdpModal(ip) {
-  _rdpPendingIp = ip;
-  document.getElementById('rdp-modal').classList.remove('hidden');
-}
-
-function closeRdpModal() {
-  document.getElementById('rdp-modal').classList.add('hidden');
-  _rdpPendingIp = null;
-}
-
-async function downloadRdpSetup() {
-  // Scarica il file .reg tramite apiFetch (gestisce X-Api-Key)
+async function doRdp(hostname) {
+  // Scarica il file .rdp tramite apiFetch (gestisce X-Api-Key)
   try {
-    const res = await apiFetch('/api/rdp-setup.reg');
+    const res = await apiFetch(`/api/rdp/${hostname}`);
     if (!res.ok) return;
     const blob = await res.blob();
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = 'rdp-setup.reg';
+    a.download = `${hostname}.rdp`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
