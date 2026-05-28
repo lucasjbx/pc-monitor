@@ -399,6 +399,10 @@ function renderMarkers() {
 
   for (const hostname of placed) {
     const pos = positions[hostname];
+    // Salta posizioni invalide (NaN, undefined, fuori [0,1]) che potrebbero essere
+    // state salvate con versioni precedenti dell'editor quando aveva bug di offset
+    if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number' ||
+        isNaN(pos.x) || isNaN(pos.y) || pos.x < 0 || pos.x > 1 || pos.y < 0 || pos.y > 1) continue;
     const pc  = pcs.find(p => p.hostname === hostname) || { hostname, ip: '', online: false, user: '' };
     const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
     const sel = hostname === selectedHost ? ' selected' : '';
@@ -555,10 +559,18 @@ function renderPanelActions(pc) {
 
   // Remote Desktop (solo se online e ha IP)
   if (pc.online && pc.ip) {
-    const btn = document.createElement('a');
+    const btn = document.createElement('button');
     btn.className   = 'btn-action rdp';
     btn.textContent = '🖥 Remote Desktop';
-    btn.href        = `rdp://full%20address=s:${pc.ip}`;
+    btn.addEventListener('click', () => {
+      // Iframe nascosto: apre il protocollo rdp:// senza navigare la pagina corrente
+      // (evita il blocco about:blank#blocked di Chrome sui protocolli custom)
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = `rdp://full%20address=s:${pc.ip}`;
+      document.body.appendChild(iframe);
+      setTimeout(() => document.body.removeChild(iframe), 2000);
+    });
     container.appendChild(btn);
   }
 
