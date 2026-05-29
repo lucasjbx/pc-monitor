@@ -218,22 +218,13 @@ _migrate_secrets_to_registry()
 
 
 # ── Helpers di rete ───────────────────────────────────────────────────────────
-def resolve_ip(pc: dict) -> str:
+def get_wmi_target(pc: dict) -> str:
     """
-    Restituisce l'IP del PC.
-    Se pc["ip"] è valorizzato lo usa direttamente;
-    altrimenti prova a risolvere l'hostname via DNS.
+    Restituisce il target per ping e WMI.
+    Se pc["ip"] è valorizzato lo usa (retrocompatibilità);
+    altrimenti usa l'hostname — su Windows AD, DCOM risolve via DNS/NetBIOS automaticamente.
     """
-    ip = pc.get("ip", "")
-    if ip:
-        return ip
-    hostname = pc.get("hostname", "")
-    if not hostname:
-        return ""
-    try:
-        return socket.gethostbyname(hostname)
-    except Exception:
-        return ""
+    return pc.get("ip", "") or pc.get("hostname", "")
 
 
 def get_local_ip(gateway_ip: str) -> str:
@@ -311,8 +302,8 @@ def get_static_wmi(pc: dict) -> dict:
     """
     result = {"os": "", "model": "", "manufacturer": "", "ram_gb": None,
               "disk_total": None, "disk_type": "", "net_speed": None}
-    ip = pc.get("ip", "")
-    if not ip:
+    target = get_wmi_target(pc)
+    if not target:
         return result
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
@@ -326,7 +317,7 @@ def get_static_wmi(pc: dict) -> dict:
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c = wmilib.WMI(computer=ip, user=wmi_user, password=wmi_pass)
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
 
             try:
                 os_objs = c.Win32_OperatingSystem()
@@ -358,7 +349,7 @@ def get_static_wmi(pc: dict) -> dict:
             # Tipo disco: prova namespace storage, fallback su nome modello
             disk_type = ""
             try:
-                stor = wmilib.WMI(computer=ip, user=wmi_user, password=wmi_pass,
+                stor = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass,
                                   namespace="root\\microsoft\\windows\\storage")
                 for d in stor.MSFT_PhysicalDisk():
                     media = getattr(d, "MediaType", None)
@@ -398,13 +389,14 @@ def get_static_wmi(pc: dict) -> dict:
     return result
 
 
-def get_dynamic_wmi(ip: str) -> dict:
+def get_dynamic_wmi(target: str) -> dict:
     """
     Dati che cambiano ad ogni poll: utente loggato, CPU%, RAM%, uptime, spazio disco libero.
+    Scopre anche l'IP corrente del PC via Win32_NetworkAdapterConfiguration (aggiornato con DHCP).
     """
     result = {"user": "", "since": None, "cpu": None, "ram_pct": None,
-              "uptime": None, "disk_free": None}
-    if not ip:
+              "uptime": None, "disk_free": None, "ip": ""}
+    if not target:
         return result
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
@@ -418,7 +410,7 @@ def get_dynamic_wmi(ip: str) -> dict:
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c = wmilib.WMI(computer=ip, user=wmi_user, password=wmi_pass)
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
 
             for proc in c.Win32_Process(Name="explorer.exe"):
                 owner = proc.GetOwner()
@@ -464,6 +456,20 @@ def get_dynamic_wmi(ip: str) -> dict:
             except Exception:
                 pass
 
+            # Scopre l'IP corrente del PC — aggiornato automaticamente ad ogni poll (DHCP)
+            try:
+                for nic in c.Win32_NetworkAdapterConfiguration(IPEnabled=True):
+                    addrs = nic.IPAddress or []
+                    for addr in addrs:
+                        # IPv4, esclude APIPA (169.254.x.x) e loopback
+                        if "." in addr and not addr.startswith("169.254") and addr != "127.0.0.1":
+                            result["ip"] = addr
+                            break
+                    if result["ip"]:
+                        break
+            except Exception:
+                pass
+
         finally:
             pythoncom.CoUninitialize()
     except Exception:
@@ -473,33 +479,38 @@ def get_dynamic_wmi(ip: str) -> dict:
 
 def check_pc(pc: dict) -> dict:
     """Controlla stato di un PC: ping + WMI dinamico ogni poll, WMI statico una volta sola."""
-    ip     = resolve_ip(pc)   # usa IP da config se presente, altrimenti risolve via DNS
-    online = ping(ip)
+    target = get_wmi_target(pc)   # hostname (o IP se ancora in config per retrocompatibilità)
+    online = ping(target)
 
     if not online:
         # Svuota la cache statica: al prossimo avvio verrà riletta
         with _pc_static_cache_lock:
             _pc_static_cache.pop(pc["hostname"], None)
+        # Preserva l'ultimo IP scoperto da WMI (dal poll precedente):
+        # così il marker resta rosso "offline" invece di grigio "N/D"
+        with _cache_lock:
+            prev = next((p for p in _pc_cache if p.get("hostname") == pc.get("hostname")), None)
+        last_ip = (prev or {}).get("ip", "") or pc.get("ip", "")
         empty = {"user": "", "fullname": "", "since": None, "cpu": None,
                  "ram_pct": None, "uptime": None, "disk_free": None,
                  "os": "", "model": "", "ram_gb": None, "disk_total": None,
                  "disk_type": "", "net_speed": None}
-        # Non azzerare manufacturer: il valore del config è preservato in pc
-        return {**pc, "ip": ip, "online": False, **empty}
+        return {**pc, "ip": last_ip, "online": False, **empty}
 
-    dynamic  = get_dynamic_wmi(ip)
+    dynamic       = get_dynamic_wmi(target)
+    discovered_ip = dynamic.pop("ip", "")             # IP scoperto da Win32_NetworkAdapterConfiguration
+    ip_for_result = discovered_ip or pc.get("ip", "") # preferisce WMI, fallback config
+
     fullname = lookup_fullname_ad(dynamic["user"]) if dynamic["user"] else ""
 
-    # Passa l'IP risolto a get_static_wmi — necessario se il config non lo ha
-    pc_with_ip = {**pc, "ip": ip}
     with _pc_static_cache_lock:
         static = _pc_static_cache.get(pc["hostname"])
     if static is None:
-        static = get_static_wmi(pc_with_ip)
+        static = get_static_wmi(pc)   # get_static_wmi usa get_wmi_target internamente
         with _pc_static_cache_lock:
             _pc_static_cache[pc["hostname"]] = static
 
-    return {**pc, "ip": ip, "online": True, **static, **dynamic, "fullname": fullname}
+    return {**pc, "ip": ip_for_result, "online": True, **static, **dynamic, "fullname": fullname}
 
 
 # ── Cache in background ───────────────────────────────────────────────────────
@@ -603,9 +614,9 @@ def shutdown_pc(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    ip = resolve_ip(pc)
-    if not ip:
-        return jsonify({"error": f"IP non risolvibile per {hostname}"}), 400
+    target = get_wmi_target(pc)
+    if not target:
+        return jsonify({"error": "Hostname non configurato"}), 400
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
     if not wmi_user or not wmi_pass:
@@ -615,7 +626,7 @@ def shutdown_pc(hostname: str):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c = wmi.WMI(computer=ip, user=wmi_user, password=wmi_pass)
+            c = wmi.WMI(computer=target, user=wmi_user, password=wmi_pass)
             for os_obj in c.Win32_OperatingSystem():
                 os_obj.Win32Shutdown(12)  # 12 = force power off
         finally:
@@ -632,9 +643,12 @@ def rdp_file(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    ip = resolve_ip(pc)
+    # Cerca l'IP scoperto via WMI nel poll precedente
+    with _cache_lock:
+        cached = next((p for p in _pc_cache if p.get("hostname") == hostname), None)
+    ip = (cached or {}).get("ip", "") or pc.get("ip", "")
     if not ip:
-        return jsonify({"error": f"IP non risolvibile per {hostname}"}), 400
+        return jsonify({"error": "IP non ancora scoperto — attendere il prossimo poll o assicurarsi che il PC sia online"}), 400
     content = (
         f"full address:s:{ip}\r\n"
         f"prompt for credentials:i:1\r\n"
@@ -654,9 +668,9 @@ def ping_single(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    ip = resolve_ip(pc)
-    online = ping(ip)
-    return jsonify({"hostname": hostname, "online": online, "ip": ip})
+    target = get_wmi_target(pc)
+    online = ping(target)
+    return jsonify({"hostname": hostname, "online": online, "ip": target})
 
 
 # ── Endpoint Config ───────────────────────────────────────────────────────────
