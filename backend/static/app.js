@@ -1102,9 +1102,7 @@ function renderPcsTable() {
   tbody.innerHTML = pcsArr.map((pc, i) =>
     `<tr>
       <td class="settings-cell">${escHtml(pc.hostname)}</td>
-      <td class="settings-cell">${escHtml(pc.ip)}</td>
       <td class="settings-cell settings-mono">${escHtml(pc.mac)}</td>
-      <td class="settings-cell">${escHtml(pc.manufacturer)}</td>
       <td class="settings-cell settings-cell-actions">
         <button class="settings-row-btn" onclick="showEditPcForm(${i})">✎</button>
         <button class="settings-row-btn settings-row-btn-del" onclick="deletePc(${i})">✕</button>
@@ -1115,10 +1113,8 @@ function renderPcsTable() {
 
 function showAddPcForm() {
   settingsEditIdx = -1;
-  document.getElementById('pc-form-hostname').value     = '';
-  document.getElementById('pc-form-ip').value           = '';
-  document.getElementById('pc-form-mac').value          = '';
-  document.getElementById('pc-form-manufacturer').value = '';
+  document.getElementById('pc-form-hostname').value = '';
+  document.getElementById('pc-form-mac').value      = '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiungi';
   document.getElementById('pc-form').classList.remove('hidden');
   document.getElementById('pc-form-hostname').focus();
@@ -1128,10 +1124,8 @@ function showEditPcForm(idx) {
   settingsEditIdx = idx;
   const pc = (settingsConfig.pcs || [])[idx];
   if (!pc) return;
-  document.getElementById('pc-form-hostname').value     = pc.hostname     || '';
-  document.getElementById('pc-form-ip').value           = pc.ip           || '';
-  document.getElementById('pc-form-mac').value          = pc.mac          || '';
-  document.getElementById('pc-form-manufacturer').value = pc.manufacturer || '';
+  document.getElementById('pc-form-hostname').value = pc.hostname || '';
+  document.getElementById('pc-form-mac').value      = pc.mac      || '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiorna';
   document.getElementById('pc-form').classList.remove('hidden');
   document.getElementById('pc-form-hostname').focus();
@@ -1144,10 +1138,8 @@ function hidePcForm() {
 
 function confirmPcForm() {
   const pc = {
-    hostname:     document.getElementById('pc-form-hostname').value.trim(),
-    ip:           document.getElementById('pc-form-ip').value.trim(),
-    mac:          document.getElementById('pc-form-mac').value.trim(),
-    manufacturer: document.getElementById('pc-form-manufacturer').value.trim(),
+    hostname: document.getElementById('pc-form-hostname').value.trim(),
+    mac:      document.getElementById('pc-form-mac').value.trim(),
   };
   if (!pc.hostname) {
     document.getElementById('pc-form-hostname').focus();

@@ -683,6 +683,7 @@ body {
 }
 .settings-hint.ok  { color: #2a7d46; font-weight: 500; }
 .settings-hint.err { color: #8a3030; font-weight: 500; }
+.settings-hint-inline { font-size: 10px; color: #aaa; font-weight: 400; }
 
 .settings-password-wrap {
   display: flex; gap: 6px; align-items: center;

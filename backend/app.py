@@ -218,6 +218,24 @@ _migrate_secrets_to_registry()
 
 
 # ── Helpers di rete ───────────────────────────────────────────────────────────
+def resolve_ip(pc: dict) -> str:
+    """
+    Restituisce l'IP del PC.
+    Se pc["ip"] è valorizzato lo usa direttamente;
+    altrimenti prova a risolvere l'hostname via DNS.
+    """
+    ip = pc.get("ip", "")
+    if ip:
+        return ip
+    hostname = pc.get("hostname", "")
+    if not hostname:
+        return ""
+    try:
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return ""
+
+
 def get_local_ip(gateway_ip: str) -> str:
     """Trova l'IP locale sull'interfaccia che raggiunge il gateway"""
     try:
@@ -291,8 +309,8 @@ def get_static_wmi(pc: dict) -> dict:
     Dati che non cambiano mai: OS, modello, RAM totale, disco totale+tipo, velocità rete.
     Chiamata una sola volta per PC; il risultato viene cachato fino a quando va offline.
     """
-    result = {"os": "", "model": "", "ram_gb": None, "disk_total": None,
-              "disk_type": "", "net_speed": None}
+    result = {"os": "", "model": "", "manufacturer": "", "ram_gb": None,
+              "disk_total": None, "disk_type": "", "net_speed": None}
     ip = pc.get("ip", "")
     if not ip:
         return result
@@ -324,7 +342,8 @@ def get_static_wmi(pc: dict) -> dict:
             try:
                 cs = c.Win32_ComputerSystem()
                 if cs:
-                    result["model"] = getattr(cs[0], "Model", "") or ""
+                    result["model"]        = getattr(cs[0], "Model",        "") or ""
+                    result["manufacturer"] = getattr(cs[0], "Manufacturer", "") or ""
             except Exception:
                 pass
 
@@ -454,7 +473,8 @@ def get_dynamic_wmi(ip: str) -> dict:
 
 def check_pc(pc: dict) -> dict:
     """Controlla stato di un PC: ping + WMI dinamico ogni poll, WMI statico una volta sola."""
-    online = ping(pc["ip"])
+    ip     = resolve_ip(pc)   # usa IP da config se presente, altrimenti risolve via DNS
+    online = ping(ip)
 
     if not online:
         # Svuota la cache statica: al prossimo avvio verrà riletta
@@ -463,20 +483,22 @@ def check_pc(pc: dict) -> dict:
         empty = {"user": "", "fullname": "", "since": None, "cpu": None,
                  "ram_pct": None, "uptime": None, "disk_free": None,
                  "os": "", "model": "", "ram_gb": None, "disk_total": None,
-                 "disk_type": "", "net_speed": None}
-        return {**pc, "online": False, **empty}
+                 "disk_type": "", "net_speed": None, "manufacturer": ""}
+        return {**pc, "ip": ip, "online": False, **empty}
 
-    dynamic  = get_dynamic_wmi(pc["ip"])
+    dynamic  = get_dynamic_wmi(ip)
     fullname = lookup_fullname_ad(dynamic["user"]) if dynamic["user"] else ""
 
+    # Passa l'IP risolto a get_static_wmi — necessario se il config non lo ha
+    pc_with_ip = {**pc, "ip": ip}
     with _pc_static_cache_lock:
         static = _pc_static_cache.get(pc["hostname"])
     if static is None:
-        static = get_static_wmi(pc)
+        static = get_static_wmi(pc_with_ip)
         with _pc_static_cache_lock:
             _pc_static_cache[pc["hostname"]] = static
 
-    return {**pc, "online": True, **static, **dynamic, "fullname": fullname}
+    return {**pc, "ip": ip, "online": True, **static, **dynamic, "fullname": fullname}
 
 
 # ── Cache in background ───────────────────────────────────────────────────────
@@ -580,8 +602,9 @@ def shutdown_pc(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    if not pc.get("ip"):
-        return jsonify({"error": "IP non disponibile"}), 400
+    ip = resolve_ip(pc)
+    if not ip:
+        return jsonify({"error": f"IP non risolvibile per {hostname}"}), 400
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
     if not wmi_user or not wmi_pass:
@@ -591,7 +614,7 @@ def shutdown_pc(hostname: str):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c = wmi.WMI(computer=pc["ip"], user=wmi_user, password=wmi_pass)
+            c = wmi.WMI(computer=ip, user=wmi_user, password=wmi_pass)
             for os_obj in c.Win32_OperatingSystem():
                 os_obj.Win32Shutdown(12)  # 12 = force power off
         finally:
@@ -608,10 +631,11 @@ def rdp_file(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    if not pc.get("ip"):
-        return jsonify({"error": "IP non disponibile"}), 400
+    ip = resolve_ip(pc)
+    if not ip:
+        return jsonify({"error": f"IP non risolvibile per {hostname}"}), 400
     content = (
-        f"full address:s:{pc['ip']}\r\n"
+        f"full address:s:{ip}\r\n"
         f"prompt for credentials:i:1\r\n"
         f"administrative session:i:1\r\n"
     )
@@ -629,8 +653,9 @@ def ping_single(hostname: str):
     pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
-    online = ping(pc["ip"])
-    return jsonify({"hostname": hostname, "online": online})
+    ip = resolve_ip(pc)
+    online = ping(ip)
+    return jsonify({"hostname": hostname, "online": online, "ip": ip})
 
 
 # ── Endpoint Config ───────────────────────────────────────────────────────────
@@ -682,6 +707,24 @@ def post_config():
         _pc_static_cache.clear()
     with _fullname_cache_lock:
         _fullname_cache.clear()
+
+    # Aggiorna _pc_cache immediatamente: rimuove PC eliminati, aggiunge nuovi come offline.
+    # Così il frontend vede i cambiamenti entro 1.2s senza aspettare il ciclo di polling.
+    new_hostnames = {pc["hostname"] for pc in data.get("pcs", []) if pc.get("hostname")}
+    offline_template = {
+        "online": False, "user": "", "fullname": "", "since": None,
+        "cpu": None, "ram_pct": None, "uptime": None, "disk_free": None,
+        "os": "", "model": "", "manufacturer": "", "ram_gb": None,
+        "disk_total": None, "disk_type": "", "net_speed": None
+    }
+    with _cache_lock:
+        _pc_cache[:] = [p for p in _pc_cache if p.get("hostname") in new_hostnames]
+        cached_hostnames = {p.get("hostname") for p in _pc_cache}
+        for pc in data.get("pcs", []):
+            hn = pc.get("hostname")
+            if hn and hn not in cached_hostnames:
+                _pc_cache.append({**pc, **offline_template})
+
     _poll_event.set()
     return jsonify({"ok": True})
 
