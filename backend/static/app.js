@@ -514,6 +514,11 @@ function updatePanel(pc) {
     `<tr><td class="panel-label">IP</td><td class="panel-value">${pc.ip || '—'}</td></tr>` +
     `<tr><td class="panel-label">MAC</td><td class="panel-value panel-mono">${pc.mac || '—'}</td></tr>`;
 
+  if (pc.wmi_error) {
+    rows += `<tr><td class="panel-label" style="color:#ef4444">⚠ WMI</td>` +
+            `<td class="panel-value" style="color:#ef4444;font-size:11px;word-break:break-all">${escHtml(pc.wmi_error)}</td></tr>`;
+  }
+
   if (pc.model) {
     rows += `<tr><td class="panel-label">Modello</td><td class="panel-value">${pc.model}</td></tr>`;
   }

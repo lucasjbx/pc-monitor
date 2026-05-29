@@ -407,8 +407,9 @@ def get_dynamic_wmi(target: str) -> dict:
     Scopre anche l'IP corrente del PC via Win32_NetworkAdapterConfiguration (aggiornato con DHCP).
     """
     result = {"user": "", "since": None, "cpu": None, "ram_pct": None,
-              "uptime": None, "disk_free": None, "ip": ""}
+              "uptime": None, "disk_free": None, "ip": "", "wmi_error": ""}
     if not target:
+        result["wmi_error"] = "Target non disponibile (hostname/IP mancante)"
         return result
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
@@ -416,6 +417,7 @@ def get_dynamic_wmi(target: str) -> dict:
     # Se le credenziali WMI non sono configurate, salta la query per evitare
     # auth fallite in loop che potrebbero bloccare l'account AD
     if not wmi_user or not wmi_pass:
+        result["wmi_error"] = "Credenziali WMI non configurate (Impostazioni → WMI)"
         return result
     try:
         import wmi as wmilib
@@ -484,8 +486,8 @@ def get_dynamic_wmi(target: str) -> dict:
 
         finally:
             pythoncom.CoUninitialize()
-    except Exception:
-        pass
+    except Exception as e:
+        result["wmi_error"] = f"{type(e).__name__}: {e}"
     return result
 
 
@@ -510,7 +512,8 @@ def check_pc(pc: dict) -> dict:
         return {**pc, "ip": last_ip, "online": False, **empty}
 
     dynamic       = get_dynamic_wmi(target)
-    discovered_ip = dynamic.pop("ip", "")             # IP scoperto da Win32_NetworkAdapterConfiguration
+    discovered_ip = dynamic.pop("ip",        "")   # IP scoperto da Win32_NetworkAdapterConfiguration
+    wmi_error     = dynamic.pop("wmi_error", "")   # errore di connessione WMI (per debug)
     ip_for_result = discovered_ip or pc.get("ip", "") # preferisce WMI, fallback config
 
     fullname = lookup_fullname_ad(dynamic["user"]) if dynamic["user"] else ""
@@ -522,7 +525,8 @@ def check_pc(pc: dict) -> dict:
         with _pc_static_cache_lock:
             _pc_static_cache[pc["hostname"]] = static
 
-    return {**pc, "ip": ip_for_result, "online": True, **static, **dynamic, "fullname": fullname}
+    return {**pc, "ip": ip_for_result, "wmi_error": wmi_error,
+            "online": True, **static, **dynamic, "fullname": fullname}
 
 
 # ── Cache in background ───────────────────────────────────────────────────────
