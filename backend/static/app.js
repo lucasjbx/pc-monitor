@@ -1137,25 +1137,25 @@ function hidePcForm() {
 }
 
 function confirmPcForm() {
-  const pc = {
-    hostname: document.getElementById('pc-form-hostname').value.trim(),
-    mac:      document.getElementById('pc-form-mac').value.trim(),
-  };
-  if (!pc.hostname) {
+  const hostname = document.getElementById('pc-form-hostname').value.trim();
+  const mac      = document.getElementById('pc-form-mac').value.trim();
+  if (!hostname) {
     document.getElementById('pc-form-hostname').focus();
     return;
   }
   if (!settingsConfig.pcs) settingsConfig.pcs = [];
 
   if (settingsEditIdx === -1) {
-    // Verifica hostname duplicato
-    if (settingsConfig.pcs.some(p => p.hostname === pc.hostname)) {
-      alert(`Hostname "${pc.hostname}" già presente.`);
+    // Nuovo PC — verifica hostname duplicato
+    if (settingsConfig.pcs.some(p => p.hostname === hostname)) {
+      alert(`Hostname "${hostname}" già presente.`);
       return;
     }
-    settingsConfig.pcs.push(pc);
+    settingsConfig.pcs.push({ hostname, mac });
   } else {
-    settingsConfig.pcs[settingsEditIdx] = pc;
+    // Modifica PC esistente: preserva tutti i campi esistenti (incluso ip, ecc.)
+    const existing = settingsConfig.pcs[settingsEditIdx] || {};
+    settingsConfig.pcs[settingsEditIdx] = { ...existing, hostname, mac };
   }
   hidePcForm();
   renderPcsTable();

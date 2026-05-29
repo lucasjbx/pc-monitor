@@ -483,7 +483,8 @@ def check_pc(pc: dict) -> dict:
         empty = {"user": "", "fullname": "", "since": None, "cpu": None,
                  "ram_pct": None, "uptime": None, "disk_free": None,
                  "os": "", "model": "", "ram_gb": None, "disk_total": None,
-                 "disk_type": "", "net_speed": None, "manufacturer": ""}
+                 "disk_type": "", "net_speed": None}
+        # Non azzerare manufacturer: il valore del config è preservato in pc
         return {**pc, "ip": ip, "online": False, **empty}
 
     dynamic  = get_dynamic_wmi(ip)
