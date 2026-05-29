@@ -220,11 +220,23 @@ _migrate_secrets_to_registry()
 # ── Helpers di rete ───────────────────────────────────────────────────────────
 def get_wmi_target(pc: dict) -> str:
     """
-    Restituisce il target per ping e WMI.
-    Se pc["ip"] è valorizzato lo usa (retrocompatibilità);
-    altrimenti usa l'hostname — su Windows AD, DCOM risolve via DNS/NetBIOS automaticamente.
+    Restituisce il target (IP) per ping e WMI.
+    - Se pc["ip"] è valorizzato lo usa direttamente (retrocompatibilità)
+    - Altrimenti risolve l'hostname via DNS per ottenere l'IP corrente:
+      su Windows AD con DDNS il record viene aggiornato ad ogni rinnovo DHCP,
+      quindi gethostbyname restituisce sempre l'IP attuale senza doverlo configurare.
+    - Fallback finale: l'hostname stesso (DCOM può risolverlo via NetBIOS su reti locali).
     """
-    return pc.get("ip", "") or pc.get("hostname", "")
+    ip = pc.get("ip", "")
+    if ip:
+        return ip
+    hostname = pc.get("hostname", "")
+    if not hostname:
+        return ""
+    try:
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return hostname   # DCOM su rete locale può usare il nome diretto
 
 
 def get_local_ip(gateway_ip: str) -> str:
