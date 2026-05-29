@@ -9,10 +9,12 @@ let shutdownStatus  = {};     // hostname → null | 'confirm' | 'sending' | 'ok
 let fetching        = false;
 
 // Stato editor
-let editorPos       = {};
-let editorSelected  = null;
-let _drag           = null;   // { hostname, el } durante il trascinamento di un marker sulla mappa
-let _sidebarDrag    = null;   // { hostname, ghostEl, startX, startY, moved } durante drag dalla lista
+let editorPos            = {};
+let editorSelected       = null;
+let editingMode          = false;
+let _drag                = null;   // { hostname, el } durante il trascinamento di un marker sulla mappa
+let _sidebarDrag         = null;   // { hostname, ghostEl, startX, startY, moved } durante drag dalla lista
+let _editorClickHandler  = null;   // listener click-to-place, aggiunto/rimosso con openEditor/closeEditor
 
 // Stato impostazioni
 let settingsConfig  = {};          // copia locale della config durante editing
@@ -23,6 +25,13 @@ let zoom = 1.0;
 let panX = 0;
 let panY = 0;
 let _pan = null;   // { startX, startY, startPanX, startPanY }
+
+// Stato zoom editor (indipendente dalla mappa normale)
+let editorZoom  = 1.0;
+let editorPanX  = 0;
+let editorPanY  = 0;
+let _editorPan  = null;   // { startX, startY, startPanX, startPanY }
+let editorSearchQuery = '';
 
 // Stato pannello PC list
 let selectedPCs   = new Set();
@@ -136,12 +145,52 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Panel PC
   document.getElementById('btn-panel-close').addEventListener('click', closePanel);
 
-  // Editor posizioni
-  document.getElementById('btn-editor-close').addEventListener('click', closeEditor);
-  document.getElementById('btn-save-positions').addEventListener('click', savePositions);
-  document.getElementById('editor-img').addEventListener('click', handleEditorClick);
+  // Editor posizioni (full-screen)
+  document.getElementById('btn-editor-cancel').addEventListener('click', closeEditor);
+  document.getElementById('btn-editor-cancel-2').addEventListener('click', closeEditor);
+  document.getElementById('btn-editor-save').addEventListener('click', savePositions);
+  document.getElementById('btn-editor-save-2').addEventListener('click', savePositions);
+  document.getElementById('editor-search').addEventListener('input', e => {
+    editorSearchQuery = e.target.value.toLowerCase();
+    renderEditorSidebar();
+  });
   document.getElementById('editor-pc-list').addEventListener('click', handleEditorListClick);
   document.getElementById('editor-pc-list').addEventListener('mousedown', handleEditorListMousedown);
+
+  // Zoom editor
+  document.getElementById('btn-editor-zoom-in').addEventListener('click',    () => changeEditorZoom(1.25));
+  document.getElementById('btn-editor-zoom-out').addEventListener('click',   () => changeEditorZoom(0.8));
+  document.getElementById('btn-editor-zoom-reset').addEventListener('click', resetEditorZoom);
+
+  document.getElementById('editor-floorplan-scaler').addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor  = e.deltaY < 0 ? 1.1 : 0.9;
+    const newZoom = Math.max(0.5, Math.min(4, editorZoom * factor));
+    const wrapper = document.getElementById('editor-floorplan-wrapper');
+    const rect    = wrapper.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const px = (mx - editorPanX) / editorZoom;
+    const py = (my - editorPanY) / editorZoom;
+    editorPanX = mx - px * newZoom;
+    editorPanY = my - py * newZoom;
+    editorZoom = newZoom;
+    applyEditorTransform();
+  }, { passive: false });
+
+  // Pan editor — drag sulla piantina editor (mousedown+move=pan, click=piazza PC)
+  document.getElementById('editor-floorplan-wrapper').addEventListener('mousedown', e => {
+    if (e.target.closest('.editor-mk') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
+    e.preventDefault();
+    const edScaler = document.getElementById('editor-floorplan-scaler');
+    _editorPan = { startX: e.clientX, startY: e.clientY, startPanX: editorPanX, startPanY: editorPanY };
+    edScaler.classList.add('panning');
+  });
+
+  // Escape chiude l'editor
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && editingMode) closeEditor();
+  });
 
   // Drag editor + pan mappa — mousemove/mouseup globali
   document.addEventListener('mousemove', e => {
@@ -160,22 +209,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (_sidebarDrag.ghostEl) {
         _sidebarDrag.ghostEl.style.left = `${e.clientX}px`;
         _sidebarDrag.ghostEl.style.top  = `${e.clientY}px`;
-        const img  = document.getElementById('editor-img');
-        const rect = img.getBoundingClientRect();
-        const over = e.clientX >= rect.left && e.clientX <= rect.right &&
-                     e.clientY >= rect.top  && e.clientY <= rect.bottom;
+        // In editor: usa l'immagine editor; in normale: usa floorplan-img
+        const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+        const img   = document.getElementById(imgId);
+        const rect  = img.getBoundingClientRect();
+        const over  = e.clientX >= rect.left && e.clientX <= rect.right &&
+                      e.clientY >= rect.top  && e.clientY <= rect.bottom;
         img.classList.toggle('drop-target', over);
       }
     } else if (_drag) {
-      const img  = document.getElementById('editor-img');
-      const rect = img.getBoundingClientRect();
-      const cx   = (e.clientX - rect.left) / rect.width;
-      const cy   = (e.clientY - rect.top)  / rect.height;
-      const x    = Math.max(0, Math.min(1, cx - _drag.offsetX));
-      const y    = Math.max(0, Math.min(1, cy - _drag.offsetY));
-      _drag.el.style.left = `${x * img.offsetWidth}px`;
-      _drag.el.style.top  = `${y * img.offsetHeight}px`;
+      // Drag marker: usa l'immagine editor in editingMode
+      const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+      const img   = document.getElementById(imgId);
+      const rect  = img.getBoundingClientRect();
+      const cx    = (e.clientX - rect.left) / rect.width;
+      const cy    = (e.clientY - rect.top)  / rect.height;
+      const x     = Math.max(0, Math.min(1, cx - _drag.offsetX));
+      const y     = Math.max(0, Math.min(1, cy - _drag.offsetY));
+      _drag.el.style.left = `${x * 100}%`;
+      _drag.el.style.top  = `${y * 100}%`;
       editorPos[_drag.hostname] = { x, y };
+    } else if (_editorPan) {
+      editorPanX = _editorPan.startPanX + (e.clientX - _editorPan.startX);
+      editorPanY = _editorPan.startPanY + (e.clientY - _editorPan.startY);
+      applyEditorTransform();
     } else if (_pan) {
       panX = _pan.startPanX + (e.clientX - _pan.startX);
       panY = _pan.startPanY + (e.clientY - _pan.startY);
@@ -184,7 +241,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.addEventListener('mouseup', e => {
     if (_sidebarDrag) {
-      const img = document.getElementById('editor-img');
+      // In editor: usa immagine editor; in normale: usa floorplan-img
+      const imgId = editingMode ? 'editor-floorplan-img' : 'floorplan-img';
+      const img   = document.getElementById(imgId);
       img.classList.remove('drop-target');
       if (_sidebarDrag.ghostEl) {
         // Rilascio dopo drag effettivo
@@ -217,6 +276,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderEditorMarkers();
       renderEditorSidebar();
     }
+    if (_editorPan) {
+      _editorPan = null;
+      document.getElementById('editor-floorplan-scaler').classList.remove('panning');
+    }
     if (_pan) {
       _pan = null;
       document.getElementById('floorplan-scaler').classList.remove('panning');
@@ -231,6 +294,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const scaler = document.getElementById('floorplan-scaler');
   scaler.addEventListener('wheel', e => {
     e.preventDefault();
+    if (editingMode) return;
     const factor  = e.deltaY < 0 ? 1.1 : 0.9;
     const newZoom = Math.max(0.5, Math.min(4, zoom * factor));
     const wrapper = document.getElementById('floorplan-wrapper');
@@ -245,7 +309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyTransform();
   }, { passive: false });
 
-  // Pan con mouse — drag sulla piantina (sempre attivo)
+  // Pan con mouse — drag sulla piantina (funziona anche in edit mode: mousedown+move=pan, click=piazza PC)
   document.getElementById('floorplan-wrapper').addEventListener('mousedown', e => {
     if (e.target.closest('.marker') || e.target.closest('.zoom-btn') || e.target.closest('.zoom-badge')) return;
     e.preventDefault();
@@ -390,6 +454,7 @@ function renderStats() {
 }
 
 function renderMarkers() {
+  if (editingMode) return;   // non sovrascrivere i marker editor durante il polling
   const placed = Object.keys(positions);
   const hasPos = placed.length > 0;
   document.getElementById('floorplan-wrapper').classList.toggle('hidden', !hasPos);
@@ -399,6 +464,10 @@ function renderMarkers() {
 
   for (const hostname of placed) {
     const pos = positions[hostname];
+    // Salta posizioni invalide (NaN, undefined, fuori [0,1]) che potrebbero essere
+    // state salvate con versioni precedenti dell'editor quando aveva bug di offset
+    if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number' ||
+        isNaN(pos.x) || isNaN(pos.y) || pos.x < 0 || pos.x > 1 || pos.y < 0 || pos.y > 1) continue;
     const pc  = pcs.find(p => p.hostname === hostname) || { hostname, ip: '', online: false, user: '' };
     const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
     const sel = hostname === selectedHost ? ' selected' : '';
@@ -444,6 +513,11 @@ function updatePanel(pc) {
   let rows =
     `<tr><td class="panel-label">IP</td><td class="panel-value">${pc.ip || '—'}</td></tr>` +
     `<tr><td class="panel-label">MAC</td><td class="panel-value panel-mono">${pc.mac || '—'}</td></tr>`;
+
+  if (pc.wmi_error) {
+    rows += `<tr><td class="panel-label" style="color:#ef4444">⚠ WMI</td>` +
+            `<td class="panel-value" style="color:#ef4444;font-size:11px;word-break:break-all">${escHtml(pc.wmi_error)}</td></tr>`;
+  }
 
   if (pc.model) {
     rows += `<tr><td class="panel-label">Modello</td><td class="panel-value">${pc.model}</td></tr>`;
@@ -553,6 +627,15 @@ function renderPanelActions(pc) {
     }
   }
 
+  // Remote Desktop (solo se online e ha IP) — scarica file .rdp
+  if (pc.online && pc.ip) {
+    const btn = document.createElement('button');
+    btn.className   = 'btn-action rdp';
+    btn.textContent = '🖥 Remote Desktop';
+    btn.addEventListener('click', () => doRdp(pc.hostname));
+    container.appendChild(btn);
+  }
+
   if (!pc.ip) {
     const note = document.createElement('p');
     note.className   = 'panel-note';
@@ -583,6 +666,24 @@ async function doWol(hostname) {
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
+// ── Remote Desktop ────────────────────────────────────────────────────────────
+async function doRdp(hostname) {
+  // Scarica il file .rdp tramite apiFetch (gestisce X-Api-Key)
+  try {
+    const res = await apiFetch(`/api/rdp/${hostname}`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${hostname}.rdp`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch {}
+}
+
 async function doShutdown(hostname) {
   shutdownStatus[hostname] = 'sending';
   refreshPanelIfOpen(hostname);
@@ -604,45 +705,73 @@ function refreshPanelIfOpen(hostname) {
 }
 
 // ── Editor posizioni ──────────────────────────────────────────────────────────
-let _editorResizeHandler = null;
 
 function openEditor() {
-  editorPos      = { ...positions };
-  editorSelected = null;
-  // Resetta stato del bottone salva (potrebbe essere rimasto disabled dal salvataggio precedente)
-  const saveBtn = document.getElementById('btn-save-positions');
-  saveBtn.disabled    = false;
-  saveBtn.textContent = 'Salva';
+  editorPos         = { ...positions };
+  editorSelected    = null;
+  editingMode       = true;
+  editorSearchQuery = '';
+
+  // Chiudi pannello PC se aperto
+  closePanel();
+
+  // Resetta zoom/pan dell'editor
+  resetEditorZoom();
+
+  // Mostra overlay full-screen
+  document.getElementById('editor-overlay').classList.remove('hidden');
+
+  // Resetta search
+  document.getElementById('editor-search').value = '';
+
+  // Resetta bottoni salva
+  const s1 = document.getElementById('btn-editor-save');
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s1) { s1.disabled = false; s1.textContent = 'Salva'; }
+  if (s2) { s2.disabled = false; }
+
+  // Registra listener click-to-place sul container della mappa editor
+  _editorClickHandler = handleEditorClick;
+  document.getElementById('editor-floorplan-container').addEventListener('click', _editorClickHandler);
+
+  renderEditorMarkers();
   renderEditorSidebar();
   updateEditorInstruction();
-  // PRIMA mostra l'overlay, POI renderizza i marker in pixel.
-  // Con display:none il browser non esegue il layout → img.offsetWidth = 0.
-  document.getElementById('editor-overlay').classList.remove('hidden');
-  requestAnimationFrame(() => renderEditorMarkers());
-  // Ricalcola i marker in pixel se la finestra viene ridimensionata
-  if (_editorResizeHandler) window.removeEventListener('resize', _editorResizeHandler);
-  _editorResizeHandler = () => renderEditorMarkers();
-  window.addEventListener('resize', _editorResizeHandler);
 }
 
 function closeEditor() {
-  if (_drag) { _drag.el.classList.remove('dragging'); _drag = null; }
-  if (_editorResizeHandler) {
-    window.removeEventListener('resize', _editorResizeHandler);
-    _editorResizeHandler = null;
-  }
+  if (_drag) { if (_drag.el) _drag.el.classList.remove('dragging'); _drag = null; }
+  if (_sidebarDrag) { if (_sidebarDrag.ghostEl) _sidebarDrag.ghostEl.remove(); _sidebarDrag = null; }
+  if (_editorPan) { _editorPan = null; }
+
+  editingMode = false;
   document.getElementById('editor-overlay').classList.add('hidden');
+
+  // Rimuovi listener click-to-place dall'editor
+  if (_editorClickHandler) {
+    const cont = document.getElementById('editor-floorplan-container');
+    if (cont) cont.removeEventListener('click', _editorClickHandler);
+    _editorClickHandler = null;
+  }
+
+  // Ripristina marker normali
+  renderMarkers();
 }
 
 function handleEditorClick(e) {
-  if (!editorSelected) return;
-  const img  = document.getElementById('editor-img');
+  if (!editingMode || !editorSelected) return;
+  // Click su marker editor → selezione (gestita dal listener del marker stesso), non piazzamento
+  if (e.target.closest('.editor-mk')) return;
+
+  const img  = document.getElementById('editor-floorplan-img');
   const rect = img.getBoundingClientRect();
   const x    = (e.clientX - rect.left) / rect.width;
   const y    = (e.clientY - rect.top)  / rect.height;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;   // fuori dall'immagine
 
   editorPos[editorSelected] = { x, y };
 
+  // Auto-seleziona il prossimo PC non posizionato
   const unplaced = pcs.map(p => p.hostname).filter(h => !editorPos[h] && h !== editorSelected);
   editorSelected = unplaced[0] || null;
 
@@ -679,68 +808,87 @@ function handleEditorListMousedown(e) {
 }
 
 function updateEditorInstruction() {
-  const el  = document.getElementById('editor-instruction');
-  const img = document.getElementById('editor-img');
-  img.classList.remove('crosshair');
-  el.textContent = 'Trascina un PC dalla lista sulla mappa per posizionarlo';
-  el.className   = 'editor-instruction';
+  const bar     = document.getElementById('editor-instruction-bar');
+  const wrapper = document.getElementById('editor-floorplan-wrapper');
+  if (!bar) return;
+
+  if (editorSelected && !editorPos[editorSelected]) {
+    bar.textContent = `Clicca sulla mappa per posizionare ${editorSelected}`;
+    bar.classList.add('active');
+    if (wrapper) wrapper.classList.add('placing');
+  } else {
+    bar.textContent = 'Seleziona un PC dalla lista, poi clicca sulla mappa — oppure trascinalo direttamente';
+    bar.classList.remove('active');
+    if (wrapper) wrapper.classList.remove('placing');
+  }
 }
 
 function renderEditorSidebar() {
-  const allHosts = pcs.map(p => p.hostname);
-  const placed   = allHosts.filter(h =>  editorPos[h]);
-  const unplaced = allHosts.filter(h => !editorPos[h]);
+  const allHosts   = pcs.map(p => p.hostname);
+  const query      = editorSearchQuery.trim().toLowerCase();
+  const filtered   = query ? allHosts.filter(h => h.toLowerCase().includes(query)) : allHosts;
+  const placedAll  = allHosts.filter(h => editorPos[h]).length;   // contatore totale (non filtrato)
+  const unplaced   = filtered.filter(h => !editorPos[h]);
+  const placed     = filtered.filter(h =>  editorPos[h]);
 
   let html = '';
-  if (unplaced.length > 0) {
-    html += `<div class="editor-section-title">Da posizionare <span class="editor-count">${unplaced.length}</span></div>`;
-    for (const h of unplaced) {
-      html += `<div class="editor-pc-item${editorSelected === h ? ' active' : ''}" data-hostname="${h}">${h}</div>`;
-    }
+  for (const h of unplaced) {
+    const isActive = editorSelected === h;
+    html += `<div class="editor-pc-item${isActive ? ' active' : ''}" data-hostname="${escHtml(h)}">
+      <div class="editor-pc-status unplaced"></div>
+      <span class="editor-pc-name">${escHtml(h)}</span>
+    </div>`;
   }
-  if (placed.length > 0) {
-    html += `<div class="editor-section-title" style="margin-top:8px">Posizionati <span class="editor-count ok">${placed.length}</span></div>`;
-    for (const h of placed) {
-      html += `<div class="editor-pc-item placed${editorSelected === h ? ' active' : ''}" data-hostname="${h}">
-                 <span>${h}</span>
-                 <button class="editor-remove" data-hostname="${h}">×</button>
-               </div>`;
-    }
+  for (const h of placed) {
+    const isActive = editorSelected === h;
+    html += `<div class="editor-pc-item placed${isActive ? ' active' : ''}" data-hostname="${escHtml(h)}">
+      <div class="editor-pc-status placed">✓</div>
+      <span class="editor-pc-name">${escHtml(h)}</span>
+      <button class="editor-remove" data-hostname="${escHtml(h)}">×</button>
+    </div>`;
   }
 
   document.getElementById('editor-pc-list').innerHTML = html;
-  document.getElementById('btn-save-positions').textContent = `Salva (${placed.length} PC)`;
+
+  // Aggiorna contatore nella toolbar
+  const counter = document.getElementById('editor-counter');
+  if (counter) {
+    counter.innerHTML = `<span class="count-placed">${placedAll}</span> / ${allHosts.length} posizionati`;
+  }
+
+  // Aggiorna testo bottoni salva
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s2 && !s2.disabled) s2.textContent = `Salva (${placedAll} PC)`;
 }
 
 function renderEditorMarkers() {
+  // Usa #editor-markers e #editor-floorplan-img — DOM completamente separato dalla vista normale.
+  // Coordinate in percentuale (0-1) → offset impossibile per costruzione.
   const container = document.getElementById('editor-markers');
-  const img       = document.getElementById('editor-img');
+  if (!container) return;
   container.innerHTML = '';
 
-  // Usa i pixel REALI dell'immagine, non le percentuali del container CSS.
-  // Questo elimina qualsiasi dipendenza dalle dimensioni del contenitore flex/wrapper.
-  const iw = img.offsetWidth;
-  const ih = img.offsetHeight;
-  if (!iw || !ih) {
-    // Immagine non ancora caricata: riprova al load
-    img.addEventListener('load', renderEditorMarkers, { once: true });
-    return;
-  }
-
-  for (const [hostname, pos] of Object.entries(editorPos)) {
-    const el = document.createElement('div');
-    el.className  = `editor-marker${editorSelected === hostname ? ' active' : ''}`;
-    el.style.left = `${pos.x * iw}px`;
-    el.style.top  = `${pos.y * ih}px`;
+  const entries = Object.entries(editorPos);
+  entries.forEach(([hostname, pos]) => {
+    const sel = editorSelected === hostname;
+    const el  = document.createElement('div');
+    el.className        = `editor-mk${sel ? ' edit-selected' : ''}`;
+    el.style.left       = `${pos.x * 100}%`;
+    el.style.top        = `${pos.y * 100}%`;
     el.dataset.hostname = hostname;
 
-    const label = document.createElement('span');
-    label.textContent = hostname;
-    el.appendChild(label);
+    // Cerchio numerato
+    const dot = document.createElement('div');
+    dot.className   = 'editor-mk-dot';
+
+    // Etichetta hostname
+    const lbl = document.createElement('div');
+    lbl.className   = 'editor-mk-label';
+    lbl.textContent = hostname;
 
     // Bottone × per rimozione diretta dalla mappa
     const removeBtn = document.createElement('button');
-    removeBtn.className   = 'editor-marker-remove';
+    removeBtn.className   = 'editor-mk-remove';
     removeBtn.textContent = '×';
     removeBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -750,6 +898,9 @@ function renderEditorMarkers() {
       renderEditorMarkers();
       updateEditorInstruction();
     });
+
+    el.appendChild(dot);
+    el.appendChild(lbl);
     el.appendChild(removeBtn);
 
     // Click per selezionare (solo se non si stava trascinando)
@@ -764,10 +915,10 @@ function renderEditorMarkers() {
 
     // Drag start — salva offset cursore/centro per evitare "salto"
     el.addEventListener('mousedown', e => {
-      if (e.target.closest('.editor-marker-remove')) return;
+      if (e.target.closest('.editor-mk-remove')) return;
       e.preventDefault();
       e.stopPropagation();
-      const img  = document.getElementById('editor-img');
+      const img  = document.getElementById('editor-floorplan-img');
       const rect = img.getBoundingClientRect();
       const cx   = (e.clientX - rect.left) / rect.width;
       const cy   = (e.clientY - rect.top)  / rect.height;
@@ -779,13 +930,14 @@ function renderEditorMarkers() {
     });
 
     container.appendChild(el);
-  }
+  });
 }
 
 async function savePositions() {
-  const btn = document.getElementById('btn-save-positions');
-  btn.textContent = 'Salvataggio…';
-  btn.disabled    = true;
+  const s1 = document.getElementById('btn-editor-save');
+  const s2 = document.getElementById('btn-editor-save-2');
+  if (s1) { s1.textContent = 'Salvataggio…'; s1.disabled = true; }
+  if (s2) { s2.textContent = 'Salvataggio…'; s2.disabled = true; }
   try {
     await apiFetch('/api/positions', {
       method:  'POST',
@@ -793,11 +945,10 @@ async function savePositions() {
       body:    JSON.stringify(editorPos),
     });
     positions = { ...editorPos };
-    renderMarkers();
-    closeEditor();
+    closeEditor();   // chiama renderMarkers() internamente
   } catch {
-    btn.textContent = '✕ Errore — riprova';
-    btn.disabled    = false;
+    if (s1) { s1.textContent = '✕ Errore'; s1.disabled = false; }
+    if (s2) { s2.textContent = '✕ Errore — riprova'; s2.disabled = false; }
   }
 }
 
@@ -956,9 +1107,7 @@ function renderPcsTable() {
   tbody.innerHTML = pcsArr.map((pc, i) =>
     `<tr>
       <td class="settings-cell">${escHtml(pc.hostname)}</td>
-      <td class="settings-cell">${escHtml(pc.ip)}</td>
-      <td class="settings-cell settings-mono">${escHtml(pc.mac)}</td>
-      <td class="settings-cell">${escHtml(pc.manufacturer)}</td>
+      <td class="settings-cell settings-mono">${escHtml(pc.mac || '')}</td>
       <td class="settings-cell settings-cell-actions">
         <button class="settings-row-btn" onclick="showEditPcForm(${i})">✎</button>
         <button class="settings-row-btn settings-row-btn-del" onclick="deletePc(${i})">✕</button>
@@ -969,10 +1118,8 @@ function renderPcsTable() {
 
 function showAddPcForm() {
   settingsEditIdx = -1;
-  document.getElementById('pc-form-hostname').value     = '';
-  document.getElementById('pc-form-ip').value           = '';
-  document.getElementById('pc-form-mac').value          = '';
-  document.getElementById('pc-form-manufacturer').value = '';
+  document.getElementById('pc-form-hostname').value = '';
+  document.getElementById('pc-form-mac').value      = '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiungi';
   document.getElementById('pc-form').classList.remove('hidden');
   document.getElementById('pc-form-hostname').focus();
@@ -982,10 +1129,8 @@ function showEditPcForm(idx) {
   settingsEditIdx = idx;
   const pc = (settingsConfig.pcs || [])[idx];
   if (!pc) return;
-  document.getElementById('pc-form-hostname').value     = pc.hostname     || '';
-  document.getElementById('pc-form-ip').value           = pc.ip           || '';
-  document.getElementById('pc-form-mac').value          = pc.mac          || '';
-  document.getElementById('pc-form-manufacturer').value = pc.manufacturer || '';
+  document.getElementById('pc-form-hostname').value = pc.hostname || '';
+  document.getElementById('pc-form-mac').value      = pc.mac      || '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiorna';
   document.getElementById('pc-form').classList.remove('hidden');
   document.getElementById('pc-form-hostname').focus();
@@ -997,27 +1142,25 @@ function hidePcForm() {
 }
 
 function confirmPcForm() {
-  const pc = {
-    hostname:     document.getElementById('pc-form-hostname').value.trim(),
-    ip:           document.getElementById('pc-form-ip').value.trim(),
-    mac:          document.getElementById('pc-form-mac').value.trim(),
-    manufacturer: document.getElementById('pc-form-manufacturer').value.trim(),
-  };
-  if (!pc.hostname) {
+  const hostname = document.getElementById('pc-form-hostname').value.trim();
+  const mac      = document.getElementById('pc-form-mac').value.trim();
+  if (!hostname) {
     document.getElementById('pc-form-hostname').focus();
     return;
   }
   if (!settingsConfig.pcs) settingsConfig.pcs = [];
 
   if (settingsEditIdx === -1) {
-    // Verifica hostname duplicato
-    if (settingsConfig.pcs.some(p => p.hostname === pc.hostname)) {
-      alert(`Hostname "${pc.hostname}" già presente.`);
+    // Nuovo PC — verifica hostname duplicato
+    if (settingsConfig.pcs.some(p => p.hostname === hostname)) {
+      alert(`Hostname "${hostname}" già presente.`);
       return;
     }
-    settingsConfig.pcs.push(pc);
+    settingsConfig.pcs.push({ hostname, mac });
   } else {
-    settingsConfig.pcs[settingsEditIdx] = pc;
+    // Modifica PC esistente: preserva tutti i campi non visibili nel form (es. ip da config precedente)
+    const existing = settingsConfig.pcs[settingsEditIdx] || {};
+    settingsConfig.pcs[settingsEditIdx] = { ...existing, hostname, mac };
   }
   hidePcForm();
   renderPcsTable();
@@ -1054,8 +1197,7 @@ async function uploadFloorplan() {
       const ts = Date.now();
       document.getElementById('settings-floorplan-preview').src = `/api/floorplan?t=${ts}`;
       document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
-      document.getElementById('editor-img').src                 = `/api/floorplan?t=${ts}`;
-      document.getElementById('floorplan-img').src              = `/api/floorplan?t=${ts}`;
+      document.getElementById('editor-floorplan-img').src       = `/api/floorplan?t=${ts}`;
     } else {
       setSettingsResult('floorplan-upload-result', `✕ ${data.error}`, false);
     }
@@ -1094,6 +1236,35 @@ function changeZoom(factor) {
 function resetZoom() {
   zoom = 1; panX = 0; panY = 0;
   applyTransform();
+}
+
+// ── Zoom mappa editor (indipendente) ─────────────────────────────────────────
+function applyEditorTransform() {
+  const scaler = document.getElementById('editor-floorplan-scaler');
+  if (!scaler) return;
+  scaler.style.transform = `translate(${editorPanX}px, ${editorPanY}px) scale(${editorZoom})`;
+  const badge = document.getElementById('editor-zoom-badge');
+  if (badge) badge.textContent = `${Math.round(editorZoom * 100)}%`;
+}
+
+function changeEditorZoom(factor) {
+  const newZoom = Math.max(0.5, Math.min(4, editorZoom * factor));
+  const wrapper = document.getElementById('editor-floorplan-wrapper');
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const cx = rect.width  / 2;
+  const cy = rect.height / 2;
+  const px = (cx - editorPanX) / editorZoom;
+  const py = (cy - editorPanY) / editorZoom;
+  editorPanX = cx - px * newZoom;
+  editorPanY = cy - py * newZoom;
+  editorZoom = newZoom;
+  applyEditorTransform();
+}
+
+function resetEditorZoom() {
+  editorZoom = 1; editorPanX = 0; editorPanY = 0;
+  applyEditorTransform();
 }
 
 // ── Pannello PC list ──────────────────────────────────────────────────────────

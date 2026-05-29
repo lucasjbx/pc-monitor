@@ -128,28 +128,59 @@
     <div id="panel-actions"></div>
   </div>
 
-  <!-- Editor posizioni -->
+  <!-- Editor posizioni (full-screen modal) -->
   <div id="editor-overlay" class="editor-overlay hidden">
     <div class="editor-container">
-      <div class="editor-map">
-        <div id="editor-instruction" class="editor-instruction">Seleziona un PC dalla lista →</div>
-        <div class="editor-image-wrapper">
-          <div class="editor-image-frame">
-            <img id="editor-img" src="/api/floorplan" alt="Piantina" draggable="false">
-            <div id="editor-markers"></div>
+
+      <!-- Area mappa (flex:1) -->
+      <div class="editor-map-area">
+        <div class="editor-toolbar">
+          <div class="editor-toolbar-left">
+            <span class="editor-mode-badge">MODALITÀ MODIFICA</span>
+            <span id="editor-counter" class="editor-counter">0 / 0 posizionati</span>
+          </div>
+          <div id="editor-instruction-bar" class="editor-instruction-bar">
+            Seleziona un PC dalla lista per posizionarlo
+          </div>
+          <div class="editor-toolbar-right">
+            <button id="btn-editor-save"   class="btn-editor-save">Salva</button>
+            <button id="btn-editor-cancel" class="btn-editor-cancel">Annulla</button>
+          </div>
+        </div>
+
+        <div id="editor-floorplan-wrapper" class="editor-floorplan-wrapper">
+          <div class="floorplan-zoom-controls">
+            <button class="zoom-btn" id="btn-editor-zoom-in"    title="Zoom in">+</button>
+            <button class="zoom-btn" id="btn-editor-zoom-out"   title="Zoom out">−</button>
+            <button class="zoom-btn" id="btn-editor-zoom-reset" title="Reset zoom">⊙</button>
+            <span class="zoom-badge" id="editor-zoom-badge">100%</span>
+          </div>
+          <div id="editor-floorplan-scaler" class="floorplan-scaler">
+            <div id="editor-floorplan-container" class="floorplan-container">
+              <img id="editor-floorplan-img" src="/api/floorplan"
+                   alt="Piantina" draggable="false">
+              <div id="editor-markers"></div>
+            </div>
           </div>
         </div>
       </div>
-      <div class="editor-sidebar">
+
+      <!-- Sidebar destra (280px) -->
+      <div class="editor-sidebar editor-pos-sidebar">
         <div class="editor-sidebar-header">
-          <h2>Posizioni PC</h2>
-          <button class="panel-close" id="btn-editor-close">✕</button>
+          <h2>Elenco PC</h2>
+        </div>
+        <div class="editor-search-bar">
+          <input type="text" id="editor-search" class="editor-search-input"
+                 placeholder="Cerca hostname…" autocomplete="off">
         </div>
         <div id="editor-pc-list" class="editor-pc-list"></div>
         <div class="editor-footer">
-          <button id="btn-save-positions" class="btn-save">Salva</button>
+          <button id="btn-editor-save-2"   class="btn-save">Salva</button>
+          <button id="btn-editor-cancel-2" class="btn btn-editor-cancel-alt">Annulla</button>
         </div>
       </div>
+
     </div>
   </div>
 
@@ -250,16 +281,8 @@
                   <input class="settings-input" id="pc-form-hostname" type="text" placeholder="CI0001">
                 </div>
                 <div>
-                  <label class="settings-label">IP</label>
-                  <input class="settings-input" id="pc-form-ip" type="text" placeholder="192.168.x.x">
-                </div>
-                <div>
-                  <label class="settings-label">MAC</label>
+                  <label class="settings-label">MAC <span class="settings-hint-inline">(per WOL)</span></label>
                   <input class="settings-input" id="pc-form-mac" type="text" placeholder="AA:BB:CC:DD:EE:FF">
-                </div>
-                <div>
-                  <label class="settings-label">Produttore</label>
-                  <input class="settings-input" id="pc-form-manufacturer" type="text" placeholder="HP, Dell…">
                 </div>
               </div>
               <div class="pc-form-actions">
@@ -272,7 +295,7 @@
               <table class="settings-table" id="pcs-table">
                 <thead>
                   <tr>
-                    <th>Hostname</th><th>IP</th><th>MAC</th><th>Produttore</th><th></th>
+                    <th>Hostname</th><th>MAC</th><th></th>
                   </tr>
                 </thead>
                 <tbody id="pcs-tbody"></tbody>
