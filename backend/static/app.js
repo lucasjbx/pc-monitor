@@ -1102,6 +1102,7 @@ function renderPcsTable() {
   tbody.innerHTML = pcsArr.map((pc, i) =>
     `<tr>
       <td class="settings-cell">${escHtml(pc.hostname)}</td>
+      <td class="settings-cell">${escHtml(pc.ip)}</td>
       <td class="settings-cell settings-mono">${escHtml(pc.mac)}</td>
       <td class="settings-cell settings-cell-actions">
         <button class="settings-row-btn" onclick="showEditPcForm(${i})">✎</button>
@@ -1114,6 +1115,7 @@ function renderPcsTable() {
 function showAddPcForm() {
   settingsEditIdx = -1;
   document.getElementById('pc-form-hostname').value = '';
+  document.getElementById('pc-form-ip').value       = '';
   document.getElementById('pc-form-mac').value      = '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiungi';
   document.getElementById('pc-form').classList.remove('hidden');
@@ -1125,6 +1127,7 @@ function showEditPcForm(idx) {
   const pc = (settingsConfig.pcs || [])[idx];
   if (!pc) return;
   document.getElementById('pc-form-hostname').value = pc.hostname || '';
+  document.getElementById('pc-form-ip').value       = pc.ip       || '';
   document.getElementById('pc-form-mac').value      = pc.mac      || '';
   document.getElementById('btn-pc-form-ok').textContent = 'Aggiorna';
   document.getElementById('pc-form').classList.remove('hidden');
@@ -1138,6 +1141,7 @@ function hidePcForm() {
 
 function confirmPcForm() {
   const hostname = document.getElementById('pc-form-hostname').value.trim();
+  const ip       = document.getElementById('pc-form-ip').value.trim();
   const mac      = document.getElementById('pc-form-mac').value.trim();
   if (!hostname) {
     document.getElementById('pc-form-hostname').focus();
@@ -1151,11 +1155,11 @@ function confirmPcForm() {
       alert(`Hostname "${hostname}" già presente.`);
       return;
     }
-    settingsConfig.pcs.push({ hostname, mac });
+    settingsConfig.pcs.push({ hostname, ip, mac });
   } else {
-    // Modifica PC esistente: preserva tutti i campi esistenti (incluso ip, ecc.)
+    // Modifica PC esistente: preserva tutti i campi non visibili nel form
     const existing = settingsConfig.pcs[settingsEditIdx] || {};
-    settingsConfig.pcs[settingsEditIdx] = { ...existing, hostname, mac };
+    settingsConfig.pcs[settingsEditIdx] = { ...existing, hostname, ip, mac };
   }
   hidePcForm();
   renderPcsTable();

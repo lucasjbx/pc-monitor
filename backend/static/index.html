@@ -281,6 +281,10 @@
                   <input class="settings-input" id="pc-form-hostname" type="text" placeholder="CI0001">
                 </div>
                 <div>
+                  <label class="settings-label">IP <span class="settings-hint-inline">(vuoto = DNS automatico)</span></label>
+                  <input class="settings-input" id="pc-form-ip" type="text" placeholder="192.168.x.x">
+                </div>
+                <div>
                   <label class="settings-label">MAC <span class="settings-hint-inline">(per WOL)</span></label>
                   <input class="settings-input" id="pc-form-mac" type="text" placeholder="AA:BB:CC:DD:EE:FF">
                 </div>
@@ -295,7 +299,7 @@
               <table class="settings-table" id="pcs-table">
                 <thead>
                   <tr>
-                    <th>Hostname</th><th>MAC</th><th></th>
+                    <th>Hostname</th><th>IP</th><th>MAC</th><th></th>
                   </tr>
                 </thead>
                 <tbody id="pcs-tbody"></tbody>
