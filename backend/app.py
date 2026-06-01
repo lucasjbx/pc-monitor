@@ -417,6 +417,33 @@ def get_static_wmi(pc: dict) -> dict:
     return result
 
 
+def _wmi_friendly_error(exc: Exception) -> str:
+    """
+    Converte le eccezioni WMI/COM in messaggi leggibili.
+    I codici HRESULT comuni vengono tradotti; gli altri mostrano solo il tipo.
+    """
+    s = str(exc)
+    _known = {
+        "-2147023174": "Server RPC non disponibile (firewall WMI bloccato?)",
+        "0x800706ba":  "Server RPC non disponibile (firewall WMI bloccato?)",
+        "-2147024891": "Accesso negato — verificare utente/password WMI",
+        "0x80070005":  "Accesso negato — verificare utente/password WMI",
+        "-2147024893": "Percorso non trovato — WMI non risponde",
+        "-2147217405": "Query WMI fallita",
+        "-2147023170": "Nessuna risposta dal PC (timeout RPC)",
+        "0x800706be":  "Chiamata RPC fallita",
+    }
+    sl = s.lower()
+    for code, msg in _known.items():
+        if code in sl:
+            return msg
+    # Fallback: estrae solo il messaggio tra virgolette singole se presente
+    import re as _re
+    parts = _re.findall(r"'([^']{4,})'", s)
+    readable = next((p for p in parts if not p.startswith("0x") and len(p) > 6), "")
+    return readable or f"{type(exc).__name__}: {exc}"
+
+
 def get_dynamic_wmi(target: str) -> dict:
     """
     Dati che cambiano ad ogni poll: utente loggato, CPU%, RAM%, uptime, spazio disco libero.
@@ -504,7 +531,7 @@ def get_dynamic_wmi(target: str) -> dict:
         finally:
             pythoncom.CoUninitialize()
     except Exception as e:
-        result["wmi_error"] = f"{type(e).__name__}: {e}"
+        result["wmi_error"] = _wmi_friendly_error(e)
     return result
 
 
