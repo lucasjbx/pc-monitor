@@ -40,8 +40,11 @@ let listCollapsed = localStorage.getItem('pcListCollapsed') === '1';
 let listSortKey   = localStorage.getItem('pcListSort')    || 'hostname';
 let listSortDir   = localStorage.getItem('pcListSortDir') || 'asc';
 
-// Stato vista (grid / map)
-let viewMode = localStorage.getItem('viewMode') || 'grid';
+// Stato vista (grid / map).
+// Se l'utente ha già scelto manualmente → rispetta la sua preferenza (localStorage).
+// Altrimenti: mappa se ci sono posizioni configurate, griglia se no.
+// Il valore viene raffinato in initViewMode() dopo il caricamento delle posizioni.
+let viewMode = localStorage.getItem('viewMode') || null;
 
 // Stato autenticazione
 let authToken = localStorage.getItem('pcMonitorToken') || '';
@@ -475,6 +478,12 @@ async function loadPositions() {
     const res = await apiFetch('/api/positions');
     positions = await res.json();
   } catch {}
+  // Imposta viewMode di default dopo aver caricato le posizioni:
+  // mappa se ci sono posizioni configurate, griglia altrimenti.
+  // Se l'utente ha già scelto manualmente (localStorage) quella scelta ha priorità.
+  if (!viewMode) {
+    viewMode = Object.keys(positions).length > 0 ? 'map' : 'grid';
+  }
 }
 
 // ── Render principale ─────────────────────────────────────────────────────────
