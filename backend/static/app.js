@@ -17,8 +17,9 @@ let _sidebarDrag         = null;   // { hostname, ghostEl, startX, startY, moved
 let _editorClickHandler  = null;   // listener click-to-place, aggiunto/rimosso con openEditor/closeEditor
 
 // Stato impostazioni
-let settingsConfig  = {};          // copia locale della config durante editing
-let settingsEditIdx = null;        // indice PC in modifica (-1 = nuovo)
+let settingsConfig      = {};          // copia locale della config durante editing
+let settingsEditIdx     = null;        // indice PC in modifica (-1 = nuovo)
+let settingsSelectedPcs = new Set();   // hostname selezionati nella tabella impostazioni
 
 // Stato zoom mappa
 let zoom = 1.0;
@@ -38,6 +39,9 @@ let selectedPCs   = new Set();
 let listCollapsed = localStorage.getItem('pcListCollapsed') === '1';
 let listSortKey   = localStorage.getItem('pcListSort')    || 'hostname';
 let listSortDir   = localStorage.getItem('pcListSortDir') || 'asc';
+
+// Stato vista (grid / map)
+let viewMode = localStorage.getItem('viewMode') || 'grid';
 
 // Stato autenticazione
 let authToken = localStorage.getItem('pcMonitorToken') || '';
@@ -329,6 +333,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-add-pc').addEventListener('click', showAddPcForm);
   document.getElementById('btn-pc-form-ok').addEventListener('click', confirmPcForm);
   document.getElementById('btn-pc-form-cancel').addEventListener('click', hidePcForm);
+  document.getElementById('btn-delete-selected')?.addEventListener('click', deleteSelectedPcs);
+  document.getElementById('settings-chk-all')?.addEventListener('change', e => {
+    settingsSelectedPcs.clear();
+    if (e.target.checked)
+      (settingsConfig.pcs || []).forEach(p => settingsSelectedPcs.add(p.hostname));
+    renderPcsTable();
+  });
   document.getElementById('btn-upload-floorplan').addEventListener('click', uploadFloorplan);
   document.getElementById('floorplan-file-input').addEventListener('change', () => {
     const f = document.getElementById('floorplan-file-input').files[0];
@@ -382,6 +393,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('pc-list-toggle').textContent = '❯';
   }
 
+  // Toggle mappa / griglia
+  document.getElementById('btn-view-toggle')?.addEventListener('click', () => {
+    viewMode = viewMode === 'grid' ? 'map' : 'grid';
+    localStorage.setItem('viewMode', viewMode);
+    renderMarkers();  // renderMarkers chiama applyViewMode internamente
+  });
+
+  // AD import modal
+  document.getElementById('btn-ad-import')?.addEventListener('click', openAdImport);
+  document.getElementById('btn-ad-import-close')?.addEventListener('click', () =>
+    document.getElementById('ad-import-modal').classList.add('hidden'));
+  document.getElementById('btn-ad-import-cancel')?.addEventListener('click', () =>
+    document.getElementById('ad-import-modal').classList.add('hidden'));
+  document.getElementById('btn-ad-import-confirm')?.addEventListener('click', confirmAdImport);
+  document.getElementById('ad-import-selectall')?.addEventListener('change', e => {
+    document.querySelectorAll('#ad-import-list .ad-chk').forEach(c => c.checked = e.target.checked);
+    updateAdImportConfirmBtn();
+  });
+  document.getElementById('ad-import-filter')?.addEventListener('input', e =>
+    renderAdImportList(e.target.value));
+
   // Avvia autenticazione — se ok chiama startApp()
   const authed = await initAuth();
   if (authed) startApp();
@@ -431,7 +463,10 @@ async function loadSedeName() {
     const res  = await apiFetch('/api/config');
     const cfg  = await res.json();
     const name = cfg?.sede?.name;
-    if (name) document.getElementById('sede-title').textContent = name;
+    if (name) {
+      document.getElementById('sede-title').textContent = name;
+      document.title = name;
+    }
   } catch {}
 }
 
@@ -457,8 +492,8 @@ function renderMarkers() {
   if (editingMode) return;   // non sovrascrivere i marker editor durante il polling
   const placed = Object.keys(positions);
   const hasPos = placed.length > 0;
-  document.getElementById('floorplan-wrapper').classList.toggle('hidden', !hasPos);
-  document.getElementById('floorplan-empty').classList.toggle('hidden', hasPos);
+  // La visibilità di floorplan-wrapper/floorplan-empty è gestita da applyViewMode()
+  // che viene chiamata alla fine di questa funzione.
   const container = document.getElementById('markers');
   container.innerHTML = '';
 
@@ -488,7 +523,72 @@ function renderMarkers() {
     container.appendChild(el);
   }
 
+  applyViewMode();
   renderPcList();
+}
+
+// ── Vista griglia / mappa ─────────────────────────────────────────────────────
+function applyViewMode() {
+  const placed = Object.keys(positions);
+  const hasPos = placed.length > 0;
+  const mapWrapper = document.getElementById('floorplan-wrapper');
+  const mapEmpty   = document.getElementById('floorplan-empty');
+  const gridArea   = document.getElementById('grid-view');
+  const toggleBtn  = document.getElementById('btn-view-toggle');
+
+  if (viewMode === 'grid') {
+    if (mapWrapper) mapWrapper.classList.add('hidden');
+    if (mapEmpty)   mapEmpty.classList.add('hidden');
+    if (gridArea)   gridArea.classList.remove('hidden');
+    renderGridView();
+    if (toggleBtn) { toggleBtn.textContent = '🗺'; toggleBtn.title = 'Mostra mappa'; }
+  } else {
+    if (gridArea) gridArea.classList.add('hidden');
+    if (mapWrapper) mapWrapper.classList.toggle('hidden', !hasPos);
+    if (mapEmpty)   mapEmpty.classList.toggle('hidden', hasPos);
+    if (toggleBtn) { toggleBtn.textContent = '⊞'; toggleBtn.title = 'Mostra griglia'; }
+  }
+}
+
+function renderGridView() {
+  const container = document.getElementById('grid-view');
+  if (!container) return;
+  if (!pcs || pcs.length === 0) {
+    container.innerHTML =
+      '<div class="grid-empty">Nessun PC configurato.<br><br>' +
+      'Aggiungi PC dalle <b>Impostazioni → PC</b>.</div>';
+    return;
+  }
+  const sorted = [...pcs].sort((a, b) => a.hostname.localeCompare(b.hostname));
+  container.innerHTML = sorted.map(pc => {
+    const cls      = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const user     = pc.user ? escHtml(pc.user) : '<span class="muted">—</span>';
+    const ip       = pc.ip   ? escHtml(pc.ip)   : '<span class="muted">—</span>';
+    const cpuColor = pc.cpu > 85 ? '#ef4444' : pc.cpu > 60 ? '#f59e0b' : '#22c55e';
+    const ramColor = pc.ram_pct > 90 ? '#ef4444' : pc.ram_pct > 75 ? '#f59e0b' : '#3b82f6';
+    const cpu      = pc.cpu     != null ? barHtml(pc.cpu,     cpuColor) : '<span class="muted">—</span>';
+    const ram      = pc.ram_pct != null ? barHtml(pc.ram_pct, ramColor) : '<span class="muted">—</span>';
+    return `<div class="pc-card ${cls}" data-hostname="${escHtml(pc.hostname)}">
+      <div class="pc-card-header">
+        <span class="pc-card-dot ${cls}"></span>
+        <span class="pc-card-name">${escHtml(pc.hostname)}</span>
+      </div>
+      <div class="pc-card-body">
+        <div class="pc-card-row"><span>Utente</span><span>${user}</span></div>
+        <div class="pc-card-row"><span>IP</span><span>${ip}</span></div>
+        <div class="pc-card-row"><span>CPU</span><span>${cpu}</span></div>
+        <div class="pc-card-row"><span>RAM</span><span>${ram}</span></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  container.querySelectorAll('.pc-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const hn = card.dataset.hostname;
+      const pc = pcs.find(p => p.hostname === hn);
+      if (pc) openPanel(pc);
+    });
+  });
 }
 
 // ── Pannello PC ───────────────────────────────────────────────────────────────
@@ -954,6 +1054,7 @@ async function savePositions() {
 
 // ── Impostazioni ──────────────────────────────────────────────────────────────
 async function openSettings() {
+  settingsSelectedPcs.clear();  // azzera selezione ad ogni apertura
   try {
     const res = await apiFetch('/api/config');
     settingsConfig = await res.json();
@@ -1102,18 +1203,63 @@ function setSettingsResult(id, msg, ok) {
 
 // ── Tabella PC nell'editor impostazioni ────────────────────────────────────────
 function renderPcsTable() {
-  const tbody = document.getElementById('pcs-tbody');
+  const tbody  = document.getElementById('pcs-tbody');
   const pcsArr = settingsConfig.pcs || [];
-  tbody.innerHTML = pcsArr.map((pc, i) =>
-    `<tr>
+  // Rimuovi dalla selezione hostname che non esistono più
+  settingsSelectedPcs = new Set([...settingsSelectedPcs].filter(
+    hn => pcsArr.some(p => p.hostname === hn)
+  ));
+  tbody.innerHTML = pcsArr.map((pc, i) => {
+    const checked = settingsSelectedPcs.has(pc.hostname) ? ' checked' : '';
+    const selCls  = settingsSelectedPcs.has(pc.hostname) ? ' settings-row-selected' : '';
+    return `<tr class="${selCls}">
+      <td class="settings-cell" style="width:32px;padding:7px 6px">
+        <input type="checkbox" class="settings-pc-chk" data-hostname="${escHtml(pc.hostname)}"${checked}>
+      </td>
       <td class="settings-cell">${escHtml(pc.hostname)}</td>
       <td class="settings-cell settings-mono">${escHtml(pc.mac || '')}</td>
       <td class="settings-cell settings-cell-actions">
         <button class="settings-row-btn" onclick="showEditPcForm(${i})">✎</button>
         <button class="settings-row-btn settings-row-btn-del" onclick="deletePc(${i})">✕</button>
       </td>
-    </tr>`
-  ).join('');
+    </tr>`;
+  }).join('');
+
+  // Collega i checkbox dopo aver riscritto il DOM
+  tbody.querySelectorAll('.settings-pc-chk').forEach(chk => {
+    chk.addEventListener('change', () => {
+      if (chk.checked) settingsSelectedPcs.add(chk.dataset.hostname);
+      else             settingsSelectedPcs.delete(chk.dataset.hostname);
+      _updateSettingsDeleteBtn();
+    });
+  });
+  _updateSettingsDeleteBtn();
+}
+
+function _updateSettingsDeleteBtn() {
+  const n   = settingsSelectedPcs.size;
+  const btn = document.getElementById('btn-delete-selected');
+  const cnt = document.getElementById('del-selected-count');
+  if (btn) btn.classList.toggle('hidden', n === 0);
+  if (cnt) cnt.textContent = n;
+  // Select-all: checked se tutti selezionati, indeterminate se parziale
+  const all = document.getElementById('settings-chk-all');
+  const tot = (settingsConfig.pcs || []).length;
+  if (all) {
+    all.checked       = tot > 0 && n === tot;
+    all.indeterminate = n > 0 && n < tot;
+  }
+}
+
+function deleteSelectedPcs() {
+  const n = settingsSelectedPcs.size;
+  if (!n) return;
+  if (!confirm(`Eliminare ${n} PC selezionati?`)) return;
+  settingsConfig.pcs = (settingsConfig.pcs || []).filter(
+    p => !settingsSelectedPcs.has(p.hostname)
+  );
+  settingsSelectedPcs.clear();
+  renderPcsTable();
 }
 
 function showAddPcForm() {
@@ -1411,6 +1557,70 @@ function togglePcListPanel() {
   panel.classList.toggle('collapsed', listCollapsed);
   toggle.textContent = listCollapsed ? '❯' : '❮';
   localStorage.setItem('pcListCollapsed', listCollapsed ? '1' : '0');
+}
+
+// ── Import da Active Directory ────────────────────────────────────────────────
+let _adComputersList = [];
+
+async function openAdImport() {
+  const modal = document.getElementById('ad-import-modal');
+  modal.classList.remove('hidden');
+  document.getElementById('ad-import-list').innerHTML =
+    '<div class="modal-loading">Caricamento computer da Active Directory…</div>';
+  document.getElementById('btn-ad-import-confirm').disabled = true;
+  document.getElementById('ad-import-filter').value = '';
+  document.getElementById('ad-import-selectall').checked = false;
+
+  try {
+    const res  = await apiFetch('/api/ad/computers');
+    const data = await res.json();
+    if (data.error && !data.computers.length) {
+      document.getElementById('ad-import-list').innerHTML =
+        `<div class="modal-error">Errore: ${escHtml(data.error)}</div>`;
+      return;
+    }
+    _adComputersList = data.computers || [];
+    renderAdImportList('');
+  } catch (e) {
+    document.getElementById('ad-import-list').innerHTML =
+      `<div class="modal-error">Impossibile contattare il backend.</div>`;
+  }
+}
+
+function renderAdImportList(filter) {
+  const q      = (filter || '').toLowerCase();
+  const shown  = q ? _adComputersList.filter(n => n.toLowerCase().includes(q)) : _adComputersList;
+  document.getElementById('ad-import-count').textContent = `${shown.length} trovati`;
+  const allChecked = document.getElementById('ad-import-selectall').checked;
+  document.getElementById('ad-import-list').innerHTML = shown.map(name =>
+    `<label class="modal-list-item">
+      <input type="checkbox" class="ad-chk" value="${escHtml(name)}"${allChecked ? ' checked' : ''}>
+      <span>${escHtml(name)}</span>
+    </label>`
+  ).join('');
+  document.querySelectorAll('#ad-import-list .ad-chk').forEach(chk =>
+    chk.addEventListener('change', updateAdImportConfirmBtn));
+  updateAdImportConfirmBtn();
+}
+
+function updateAdImportConfirmBtn() {
+  const n   = document.querySelectorAll('#ad-import-list .ad-chk:checked').length;
+  const btn = document.getElementById('btn-ad-import-confirm');
+  btn.disabled    = n === 0;
+  btn.textContent = n > 0 ? `Importa ${n} PC` : 'Importa selezionati';
+}
+
+function confirmAdImport() {
+  const checked = [...document.querySelectorAll('#ad-import-list .ad-chk:checked')].map(c => c.value);
+  if (!checked.length) return;
+  if (!settingsConfig.pcs) settingsConfig.pcs = [];
+  const existing = new Set(settingsConfig.pcs.map(p => (p.hostname || '').toUpperCase()));
+  const newPcs   = checked
+    .filter(hn => !existing.has(hn.toUpperCase()))
+    .map(hn => ({ hostname: hn, mac: '' }));
+  settingsConfig.pcs.push(...newPcs);
+  document.getElementById('ad-import-modal').classList.add('hidden');
+  renderPcsTable();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ Configurazione centralizzata in config.json
 """
 
 import os
+import re
 import json as json_lib
 import socket
 import subprocess
@@ -162,8 +163,23 @@ def lookup_fullname_ad(username: str) -> str:
     return fullname
 
 
+_DEFAULT_CONFIG = {
+    "sede":    {"name": "PC Monitor", "poll_interval": 10},
+    "network": {"wol_broadcast": "", "gateway_ip": "", "dc_ip": ""},
+    "wmi":     {"user": "", "pass": ""},
+    "auth":    {"token": ""},
+    "pcs":     [],
+}
+
+
 def load_config() -> dict:
-    """Carica config.json da disco e ritorna il dict"""
+    """
+    Carica config.json da disco. Se non esiste (primo avvio / installazione fresca)
+    crea il file con i valori di default e lo ritorna.
+    """
+    if not os.path.exists(CONFIG_FILE):
+        save_config(_DEFAULT_CONFIG)
+        return dict(_DEFAULT_CONFIG)
     with open(CONFIG_FILE, encoding="utf-8-sig") as f:  # utf-8-sig rimuove BOM se presente (scritto da PowerShell 5.1)
         return json_lib.load(f)
 
@@ -407,7 +423,7 @@ def get_dynamic_wmi(target: str) -> dict:
     Scopre anche l'IP corrente del PC via Win32_NetworkAdapterConfiguration (aggiornato con DHCP).
     """
     result = {"user": "", "since": None, "cpu": None, "ram_pct": None,
-              "uptime": None, "disk_free": None, "ip": "", "wmi_error": ""}
+              "uptime": None, "disk_free": None, "ip": "", "mac": "", "wmi_error": ""}
     if not target:
         result["wmi_error"] = "Target non disponibile (hostname/IP mancante)"
         return result
@@ -470,14 +486,15 @@ def get_dynamic_wmi(target: str) -> dict:
             except Exception:
                 pass
 
-            # Scopre l'IP corrente del PC — aggiornato automaticamente ad ogni poll (DHCP)
+            # Scopre l'IP e MAC correnti del PC — aggiornati automaticamente ad ogni poll (DHCP)
             try:
                 for nic in c.Win32_NetworkAdapterConfiguration(IPEnabled=True):
                     addrs = nic.IPAddress or []
                     for addr in addrs:
                         # IPv4, esclude APIPA (169.254.x.x) e loopback
                         if "." in addr and not addr.startswith("169.254") and addr != "127.0.0.1":
-                            result["ip"] = addr
+                            result["ip"]  = addr
+                            result["mac"] = (nic.MACAddress or "").upper()
                             break
                     if result["ip"]:
                         break
@@ -511,10 +528,12 @@ def check_pc(pc: dict) -> dict:
                  "disk_type": "", "net_speed": None}
         return {**pc, "ip": last_ip, "online": False, **empty}
 
-    dynamic       = get_dynamic_wmi(target)
-    discovered_ip = dynamic.pop("ip",        "")   # IP scoperto da Win32_NetworkAdapterConfiguration
-    wmi_error     = dynamic.pop("wmi_error", "")   # errore di connessione WMI (per debug)
-    ip_for_result = discovered_ip or pc.get("ip", "") # preferisce WMI, fallback config
+    dynamic        = get_dynamic_wmi(target)
+    discovered_ip  = dynamic.pop("ip",        "")   # IP scoperto da Win32_NetworkAdapterConfiguration
+    discovered_mac = dynamic.pop("mac",       "")   # MAC scoperto da Win32_NetworkAdapterConfiguration
+    wmi_error      = dynamic.pop("wmi_error", "")   # errore di connessione WMI (per debug)
+    ip_for_result  = discovered_ip or pc.get("ip", "")    # preferisce WMI, fallback config
+    mac_for_result = pc.get("mac", "") or discovered_mac  # config ha precedenza, fallback WMI
 
     fullname = lookup_fullname_ad(dynamic["user"]) if dynamic["user"] else ""
 
@@ -525,7 +544,7 @@ def check_pc(pc: dict) -> dict:
         with _pc_static_cache_lock:
             _pc_static_cache[pc["hostname"]] = static
 
-    return {**pc, "ip": ip_for_result, "wmi_error": wmi_error,
+    return {**pc, "ip": ip_for_result, "mac": mac_for_result, "wmi_error": wmi_error,
             "online": True, **static, **dynamic, "fullname": fullname}
 
 
@@ -562,6 +581,25 @@ def _poll_loop():
             with _cache_lock:
                 _pc_cache.clear()
                 _pc_cache.extend(results)
+
+            # Auto-save MAC scoperti via WMI per PC che non lo avevano in config
+            try:
+                cfg_current = get_cfg()
+                cfg_map     = {p["hostname"]: p for p in cfg_current.get("pcs", [])}
+                mac_changed = False
+                for r in results:
+                    hn  = r.get("hostname", "")
+                    mac = r.get("mac",      "")
+                    if hn and mac and hn in cfg_map and not cfg_map[hn].get("mac", ""):
+                        cfg_map[hn]["mac"] = mac
+                        mac_changed = True
+                if mac_changed:
+                    cfg_current["pcs"] = list(cfg_map.values())
+                    save_config(cfg_current)
+                    apply_config(cfg_current)
+            except Exception:
+                pass
+
         except Exception:
             pass  # Il loop non deve mai fermarsi
 
@@ -687,6 +725,94 @@ def ping_single(hostname: str):
     target = get_wmi_target(pc)
     online = ping(target)
     return jsonify({"hostname": hostname, "online": online, "ip": target})
+
+
+@app.route("/api/ad/computers")
+@require_auth
+def ad_computers():
+    """
+    Restituisce la lista dei computer presenti in Active Directory.
+    Strategia 1: Get-ADComputer con -Server e -Credential (RSAT, funziona anche da PC non-dominio).
+    Strategia 2: System.DirectoryServices.DirectoryEntry con LDAP esplicito + credenziali.
+    Entrambe usano dc_ip e le credenziali WMI dalla config.
+    """
+    import base64
+
+    cfg      = get_cfg()
+    dc_ip    = cfg.get("network", {}).get("dc_ip", "")
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+
+    if not dc_ip:
+        return jsonify({
+            "error": "IP Domain Controller non configurato (Impostazioni → Rete → IP Domain Controller)",
+            "computers": []
+        })
+
+    # Le credenziali sono opzionali: se disponibili vengono passate esplicitamente,
+    # altrimenti PowerShell usa l'identità Windows corrente del processo
+    # (funziona su AD04/AD03 dove il servizio gira come account di dominio).
+    use_creds = bool(wmi_user and wmi_pass)
+
+    def _esc(s):
+        """Escape single quotes per stringhe letterali PowerShell."""
+        return (s or "").replace("'", "''")
+
+    def _run_ps(script: str):
+        """Esegue uno script PowerShell via EncodedCommand (evita problemi di escaping)."""
+        enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=30
+        )
+
+    try:
+        # Strategia 1: Get-ADComputer (con credenziali esplicite se disponibili)
+        if use_creds:
+            ps1 = (
+                f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force\n"
+                f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)\n"
+                f"Get-ADComputer -Filter * -Server '{_esc(dc_ip)}' -Credential $cred -Properties Name "
+                f"| Select-Object -ExpandProperty Name | Sort-Object"
+            )
+        else:
+            ps1 = (
+                f"Get-ADComputer -Filter * -Server '{_esc(dc_ip)}' -Properties Name "
+                f"| Select-Object -ExpandProperty Name | Sort-Object"
+            )
+        r1 = _run_ps(ps1)
+        if r1.returncode == 0 and r1.stdout.strip():
+            names = [n.strip() for n in r1.stdout.splitlines() if n.strip()]
+        else:
+            # Strategia 2: DirectoryEntry LDAP (con o senza credenziali esplicite)
+            if use_creds:
+                ps2 = (
+                    f"$de = New-Object System.DirectoryServices.DirectoryEntry(\n"
+                    f"  'LDAP://{_esc(dc_ip)}', '{_esc(wmi_user)}', '{_esc(wmi_pass)}')\n"
+                )
+            else:
+                ps2 = f"$de = New-Object System.DirectoryServices.DirectoryEntry('LDAP://{_esc(dc_ip)}')\n"
+            ps2 += (
+                f"$s  = New-Object System.DirectoryServices.DirectorySearcher($de)\n"
+                f"$s.Filter    = '(&(objectClass=computer))'\n"
+                f"$s.SizeLimit = 1000\n"
+                f"$s.PropertiesToLoad.Add('name') | Out-Null\n"
+                f"$s.FindAll() | ForEach-Object {{ $_.Properties['name'][0] }} | Sort-Object"
+            )
+            r2 = _run_ps(ps2)
+            if r2.returncode != 0 or not r2.stdout.strip():
+                err = (r2.stderr.strip() or r1.stderr.strip() or "Nessun risultato da AD")
+                err = err.splitlines()[0] if err else "Errore sconosciuto"
+                return jsonify({"error": err, "computers": []})
+            names = [n.strip() for n in r2.stdout.splitlines() if n.strip()]
+
+        # Filtra i computer già presenti in config
+        existing  = {p["hostname"].upper() for p in cfg.get("pcs", [])}
+        computers = [n for n in names if n.upper() not in existing]
+        return jsonify({"computers": sorted(computers)})
+
+    except Exception as e:
+        return jsonify({"error": str(e), "computers": []})
 
 
 # ── Endpoint Config ───────────────────────────────────────────────────────────

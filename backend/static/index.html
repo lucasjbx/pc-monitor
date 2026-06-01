@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ciro Monitor</title>
+  <title>PC Monitor</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -12,7 +12,7 @@
   <header class="header">
     <div class="header-left">
       <h1 class="title">
-        <span id="sede-title">Ciro Monitor</span>
+        <span id="sede-title">PC Monitor</span>
         <span id="update-badge" class="update-badge hidden"></span>
       </h1>
       <span id="last-update" class="last-update"></span>
@@ -41,6 +41,7 @@
     </div>
     <div class="header-right">
       <div id="stats" class="stats"></div>
+      <button id="btn-view-toggle" class="btn-view-toggle" title="Mostra mappa">🗺</button>
       <button id="btn-editor" class="btn">Modifica posizioni</button>
       <button id="btn-settings" class="btn">⚙ Impostazioni</button>
       <button id="btn-refresh" class="btn">↻ Aggiorna</button>
@@ -82,6 +83,9 @@
             <span class="legend-item"><span class="legend-dot" style="background:#9ca3af"></span>N/D</span>
           </div>
         </div>
+
+        <!-- Card grid view (alternativa alla mappa — stessa area, flex:1) -->
+        <div id="grid-view" class="grid-view hidden"></div>
       </div>
 
       <!-- Pannello laterale tutti i PC -->
@@ -271,6 +275,8 @@
           <div class="settings-pane" id="tab-pcs">
             <div class="settings-pc-toolbar">
               <button class="btn" id="btn-add-pc">+ Aggiungi PC</button>
+              <button class="btn" id="btn-ad-import">📋 Importa da AD</button>
+              <button class="btn btn-del-selected hidden" id="btn-delete-selected">🗑 Elimina selezionati (<span id="del-selected-count">0</span>)</button>
             </div>
 
             <!-- Form aggiungi/modifica PC -->
@@ -295,6 +301,7 @@
               <table class="settings-table" id="pcs-table">
                 <thead>
                   <tr>
+                    <th style="width:32px;padding:8px 6px"><input type="checkbox" id="settings-chk-all"></th>
                     <th>Hostname</th><th>MAC</th><th></th>
                   </tr>
                 </thead>
@@ -337,6 +344,28 @@
     </div><!-- /editor-container -->
   </div><!-- /settings-overlay -->
 
+  <!-- Modal import da Active Directory -->
+  <div id="ad-import-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>Importa da Active Directory</h2>
+        <button class="panel-close" id="btn-ad-import-close">✕</button>
+      </div>
+      <div class="modal-search">
+        <input type="text" id="ad-import-filter" placeholder="Filtra hostname…" autocomplete="off">
+      </div>
+      <div class="modal-select-all">
+        <label><input type="checkbox" id="ad-import-selectall"> Seleziona tutti</label>
+        <span id="ad-import-count" class="modal-count">0 trovati</span>
+      </div>
+      <div id="ad-import-list" class="modal-list"></div>
+      <div class="modal-footer">
+        <button id="btn-ad-import-confirm" class="btn-save" disabled>Importa selezionati</button>
+        <button id="btn-ad-import-cancel" class="btn">Annulla</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Login overlay (autenticazione API key) -->
   <div id="login-overlay" class="login-overlay hidden">
     <div class="login-box">
@@ -349,7 +378,7 @@
         <line x1="16" y1="22" x2="16" y2="26" stroke="#22c55e" stroke-width="2" stroke-linecap="round"/>
         <line x1="11" y1="26" x2="21" y2="26" stroke="#22c55e" stroke-width="2" stroke-linecap="round"/>
       </svg>
-      <h2 class="login-title">Ciro Monitor</h2>
+      <h2 class="login-title">PC Monitor</h2>
       <p class="login-subtitle">Inserisci l'API key per accedere</p>
       <div class="login-form">
         <div class="settings-password-wrap">
