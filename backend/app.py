@@ -758,6 +758,22 @@ def ad_computers():
         """Escape single quotes per stringhe letterali PowerShell."""
         return (s or "").replace("'", "''")
 
+    def _ps_err(stderr: str) -> str:
+        """Estrae il messaggio leggibile dallo stderr PowerShell (gestisce formato CLIXML)."""
+        if not stderr:
+            return ""
+        s = stderr.strip()
+        if s.startswith("#< CLIXML"):
+            # PowerShell serializza gli errori in XML: estrai il primo tag <S S="Error">
+            m = re.search(r'<S S="Error">(.*?)</S>', s, re.DOTALL)
+            if m:
+                txt = m.group(1)
+                # Decodifica sequenze escape XML di PowerShell (_x000D_ = CR, _x000A_ = LF)
+                txt = re.sub(r'_x[0-9A-Fa-f]{4}_', ' ', txt)
+                return txt.strip().splitlines()[0]
+            return "Errore PowerShell non decodificabile"
+        return s.splitlines()[0]
+
     def _run_ps(script: str):
         """Esegue uno script PowerShell via EncodedCommand (evita problemi di escaping)."""
         enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
@@ -801,8 +817,7 @@ def ad_computers():
             )
             r2 = _run_ps(ps2)
             if r2.returncode != 0 or not r2.stdout.strip():
-                err = (r2.stderr.strip() or r1.stderr.strip() or "Nessun risultato da AD")
-                err = err.splitlines()[0] if err else "Errore sconosciuto"
+                err = _ps_err(r2.stderr) or _ps_err(r1.stderr) or "Nessun risultato da AD"
                 return jsonify({"error": err, "computers": []})
             names = [n.strip() for n in r2.stdout.splitlines() if n.strip()]
 
