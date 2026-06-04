@@ -513,7 +513,7 @@ function renderMarkers() {
     if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number' ||
         isNaN(pos.x) || isNaN(pos.y) || pos.x < 0 || pos.x > 1 || pos.y < 0 || pos.y > 1) continue;
     const pc  = pcs.find(p => p.hostname === hostname) || { hostname, ip: '', online: false, user: '' };
-    const cls = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const cls = pc.online ? 'online' : 'offline';
     const sel = hostname === selectedHost ? ' selected' : '';
 
     const el = document.createElement('div');
@@ -570,7 +570,7 @@ function renderGridView() {
   }
   const sorted = [...pcs].sort((a, b) => a.hostname.localeCompare(b.hostname));
   container.innerHTML = sorted.map(pc => {
-    const cls      = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const cls      = pc.online ? 'online' : 'offline';
     const user     = pc.user ? escHtml(pc.user) : '<span class="muted">—</span>';
     const ip       = pc.ip   ? escHtml(pc.ip)   : '<span class="muted">—</span>';
     const cpuColor = pc.cpu > 85 ? '#ef4444' : pc.cpu > 60 ? '#f59e0b' : '#22c55e';
@@ -1458,7 +1458,7 @@ function renderPcList() {
   countEl.textContent = sorted.length;
 
   items.innerHTML = sorted.map(pc => {
-    const cls     = pc.ip ? (pc.online ? 'online' : 'offline') : 'unknown';
+    const cls     = pc.online ? 'online' : 'offline';
     const checked = selectedPCs.has(pc.hostname) ? 'checked' : '';
     const selCls  = selectedPCs.has(pc.hostname) ? ' selected' : '';
     return `<div class="pc-list-item${selCls}" data-hostname="${escHtml(pc.hostname)}">
