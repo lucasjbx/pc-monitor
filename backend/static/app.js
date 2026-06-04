@@ -488,13 +488,11 @@ async function loadPositions() {
 
 // ── Render principale ─────────────────────────────────────────────────────────
 function renderStats() {
-  const online  = pcs.filter(p => p.online).length;
-  const offline = pcs.filter(p => !p.online && p.ip).length;
-  const unknown = pcs.filter(p => !p.ip).length;
+  const online  = pcs.filter(p =>  p.online).length;
+  const offline = pcs.filter(p => !p.online).length;
   document.getElementById('stats').innerHTML =
     `<span class="stat online">${online} online</span>` +
-    `<span class="stat offline">${offline} offline</span>` +
-    (unknown ? `<span class="stat unknown">${unknown} N/D</span>` : '');
+    (offline ? `<span class="stat offline">${offline} offline</span>` : '');
 }
 
 function renderMarkers() {
