@@ -306,6 +306,19 @@ def ping(ip: str) -> bool:
         return False
 
 
+def is_os_running(ip: str) -> bool:
+    """
+    Verifica se Windows è effettivamente in esecuzione controllando la porta 135
+    (RPC Endpoint Mapper). Se il ping risponde ma questa porta no, la NIC è
+    alimentata in S5 per WOL (comune su Lenovo e altri) ma il sistema è spento.
+    """
+    try:
+        with socket.create_connection((ip, 135), timeout=0.8):
+            return True
+    except Exception:
+        return False
+
+
 def parse_wmi_dt(s: str):
     """Converte datetime WMI '20250522083022.000000+120' → ISO string"""
     if not s:
@@ -539,6 +552,11 @@ def check_pc(pc: dict) -> dict:
     """Controlla stato di un PC: ping + WMI dinamico ogni poll, WMI statico una volta sola."""
     target = get_wmi_target(pc)   # hostname (o IP se ancora in config per retrocompatibilità)
     online = ping(target)
+
+    # Alcune NIC (Lenovo e altri) rimangono alimentate in S5 per WOL e rispondono al ping
+    # anche a PC spento. Verificiamo la porta 135 (RPC) per confermare che Windows sia attivo.
+    if online:
+        online = is_os_running(target)
 
     if not online:
         # Svuota la cache statica: al prossimo avvio verrà riletta
