@@ -938,3 +938,12 @@ body {
   padding: 8px; min-height: 80px; background: #111;
 }
 .screenshot-body img { max-width: 100%; height: auto; display: block; }
+#btn-screenshot-close {
+  position: static;
+  width: 28px; height: 28px; flex-shrink: 0;
+  background: #e5e5e3; color: #333;
+  border: none; border-radius: 50%;
+  font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#btn-screenshot-close:hover { background: #ccc; }
