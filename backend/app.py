@@ -611,6 +611,10 @@ def check_pc(pc: dict) -> dict:
 # ── Cache in background ───────────────────────────────────────────────────────
 _pc_cache   = []
 _cache_lock = threading.Lock()
+
+# Risultati screenshot in attesa (hostname → {token, done, data})
+_screenshot_results = {}
+_screenshot_lock    = threading.Lock()
 _poll_event = threading.Event()   # segnala al loop di ripartire subito dopo cambio config
 
 
@@ -843,15 +847,35 @@ def kill_process(hostname: str, pid: int):
         return jsonify({"error": _wmi_friendly_error(e)}), 500
 
 
+@app.route("/api/screenshot-receive", methods=["POST"])
+def screenshot_receive():
+    """
+    Endpoint chiamato dal PC remoto per consegnare lo screenshot catturato.
+    Non richiede auth: è chiamato internamente dal PC, protetto da token one-time.
+    """
+    data  = request.get_json(force=True) or {}
+    token = data.get("token", "")
+    b64   = data.get("data",  "")
+    if not token or not b64:
+        return jsonify({"ok": False}), 400
+    with _screenshot_lock:
+        for entry in _screenshot_results.values():
+            if entry.get("token") == token and not entry.get("done"):
+                entry["data"] = b64
+                entry["done"] = True
+                break
+    return jsonify({"ok": True})
+
+
 @app.route("/api/screenshot/<hostname>")
 @require_auth
 def get_screenshot(hostname: str):
     """
-    Cattura lo schermo del PC remoto via WinRM + Task Scheduler.
-    WinRM opera in Session 0 (non-interattiva) e non può accedere al desktop dell'utente.
-    La soluzione: uno script PowerShell gira nella sessione interattiva dell'utente loggato
-    tramite un Task Schedulato con LogonType=Interactive (non richiede password).
-    Prerequisito: WinRM abilitato sui PC target.
+    Cattura lo schermo del PC remoto usando solo WMI (nessun WinRM richiesto).
+    Flusso:
+      1. WMI crea un Task Schedulato con InteractiveToken (sessione utente, no password)
+      2. Lo script cattura lo schermo e posta il JPEG via HTTP all'app server
+      3. L'endpoint /api/screenshot-receive riceve i dati e sveglia questo thread
     """
     import base64 as _b64
 
@@ -865,110 +889,137 @@ def get_screenshot(hostname: str):
     if not wmi_user or not wmi_pass:
         return jsonify({"error": "Credenziali WMI non configurate"}), 400
 
-    def _esc(s):
-        return (s or "").replace("'", "''")
+    import base64 as _b64
+    import secrets as _sec
 
-    # Script che girerà nella sessione interattiva dell'utente (riceve outFile come $args[0]).
-    # Usa try/catch per scrivere l'errore su un file .err invece di fallire silenziosamente.
-    # C:\Users\Public è scrivibile da tutti gli utenti (evita problemi di permessi su C:\Windows\Temp).
-    inner_script = (
-        "$outF = $args[0]\n"
-        "try {\n"
-        "    Add-Type -AssemblyName System.Windows.Forms\n"
-        "    Add-Type -AssemblyName System.Drawing\n"
-        "    $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
-        "    $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
-        "    $g = [System.Drawing.Graphics]::FromImage($b)\n"
-        "    $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
-        "    $m = New-Object System.IO.MemoryStream\n"
-        "    $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
-        "    [Convert]::ToBase64String($m.ToArray()) | Out-File $outF -NoNewline -Encoding ASCII\n"
-        "} catch {\n"
-        '    $_.Exception.Message | Out-File "${outF}.err" -NoNewline -Encoding ASCII\n'
-        "}\n"
-    )
-    inner_b64 = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
+    # IP del server app (quello che i PC remoti usano per aprire l'UI)
+    gateway   = cfg.get("network", {}).get("gateway_ip", "")
+    server_ip = get_local_ip(gateway) if gateway else ""
+    if not server_ip or server_ip == "0.0.0.0":
+        return jsonify({"error": "IP server non determinabile (configura gateway_ip in Impostazioni → Rete)"}), 500
+    server_url = f"http://{server_ip}:5000/api/screenshot-receive"
 
-    # Script remoto: crea task schedulato nell'utente loggato, attende il file di output
-    remote_lines = [
-        "$ErrorActionPreference = 'Stop'",
+    # Token one-time per questa richiesta
+    token = _sec.token_hex(16)
+    with _screenshot_lock:
+        _screenshot_results[hostname] = {"token": token, "done": False, "data": None}
+
+    # Script che gira nella sessione interattiva dell'utente:
+    # cattura lo schermo e lo posta via HTTP all'app server.
+    # Usa JSON manuale per evitare overhead di ConvertTo-Json su payload grande.
+    inner_lines = [
+        f"$url   = '{server_url}'",
+        f"$token = '{token}'",
+        "try {",
+        "    Add-Type -AssemblyName System.Windows.Forms",
+        "    Add-Type -AssemblyName System.Drawing",
+        "    $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds",
+        "    $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)",
+        "    $g = [System.Drawing.Graphics]::FromImage($b)",
+        "    $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)",
+        "    $m = New-Object System.IO.MemoryStream",
+        "    $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)",
+        '    $b64  = [Convert]::ToBase64String($m.ToArray())',
+        '    $body = "{""token"":""$token"",""data"":""$b64""}"',
+        "    $req  = [System.Net.WebRequest]::Create($url)",
+        "    $req.Method      = 'POST'",
+        "    $req.ContentType = 'application/json'",
+        "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
+        "    $req.ContentLength = $bytes.Length",
+        "    $stream = $req.GetRequestStream()",
+        "    $stream.Write($bytes, 0, $bytes.Length)",
+        "    $stream.Close()",
+        "    $req.GetResponse() | Out-Null",
+        "} catch {}",
+    ]
+    inner_script = "\n".join(inner_lines)
+    inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
+
+    # Script di orchestrazione (gira in Session 0 via WMI Win32_Process.Create):
+    # trova l'utente loggato, scrive PS1 + XML task, registra e avvia il task.
+    # InteractiveToken = gira nella sessione dell'utente senza bisogno della sua password.
+    orch_lines = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
         "$ProgressPreference    = 'SilentlyContinue'",
-        # Trova l'utente loggato tramite explorer.exe
         "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
-        "if (-not $proc) { throw 'Nessun utente loggato sul PC' }",
+        "if (-not $proc) { exit 1 }",
         "$owner    = $proc.GetOwner()",
         '$username = "$($owner.Domain)\\$($owner.User)"',
-        # File temporanei in C:\Users\Public (scrivibile da tutti gli utenti)
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
-        '$outF = "C:\\Users\\Public\\pcmon_$rnd.b64"',
         '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
-        # Scrive lo script di screenshot decodificando da base64 (evita problemi di escaping)
-        f"$sb64 = '{inner_b64}'",
-        "$scriptBytes = [Convert]::FromBase64String($sb64)",
-        "[System.IO.File]::WriteAllBytes($ps1F, $scriptBytes)",
-        # Task schedulato nell'utente loggato (Interactive = usa token sessione esistente, no password)
-        # -WindowStyle Hidden evita che appaia la finestra PowerShell sullo schermo dell'utente
-        # -RunLevel Limited: non servono privilegi elevati per catturare lo schermo
-        '$tn = "PcMonSS_$rnd"',
-        '$action    = New-ScheduledTaskAction -Execute "powershell.exe" '
-        '             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`" `"$outF`""',
-        "$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)",
-        "$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited",
-        "$task      = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal",
-        "Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null",
-        "Start-ScheduledTask -TaskName $tn",
-        # Attende il file di output o di errore (max 30s)
-        '$errF = "${outF}.err"',
-        "$waited = 0",
-        "while (-not (Test-Path $outF) -and -not (Test-Path $errF) -and $waited -lt 30) {",
-        "    Start-Sleep -Milliseconds 500",
-        "    $waited += 0.5",
-        "}",
-        "Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
-        "if (Test-Path $errF) {",
-        "    $errMsg = Get-Content $errF -Raw",
-        "    Remove-Item $ps1F, $outF, $errF -Force -ErrorAction SilentlyContinue",
-        "    throw \"Errore screenshot: $errMsg\"",
-        "}",
-        "if (-not (Test-Path $outF)) { throw 'Timeout: screenshot non completato in 30s' }",
-        "$result = Get-Content $outF -Raw",
-        "Remove-Item $ps1F, $outF -Force -ErrorAction SilentlyContinue",
-        "$result",
+        '$xmlF = "C:\\Users\\Public\\pcmon_$rnd.xml"',
+        '$tn   = "PcMonSS_$rnd"',
+        # Scrive PS1 da base64 (evita ogni problema di escaping)
+        f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
+        # Scrive XML del task con InteractiveToken (no password necessaria)
+        '$xml = @"',
+        '<?xml version="1.0" encoding="UTF-16"?>',
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+        '  <Principals><Principal id="A">',
+        '    <UserId>$username</UserId>',
+        '    <LogonType>InteractiveToken</LogonType>',
+        '    <RunLevel>LeastPrivilege</RunLevel>',
+        '  </Principal></Principals>',
+        '  <Settings>',
+        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+        '  </Settings>',
+        '  <Actions Context="A"><Exec>',
+        '    <Command>powershell.exe</Command>',
+        '    <Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$ps1F"</Arguments>',
+        '  </Exec></Actions>',
+        '</Task>',
+        '"@',
+        '$xml | Out-File $xmlF -Encoding Unicode',
+        'schtasks /create /tn $tn /xml $xmlF /f | Out-Null',
+        'schtasks /run /tn $tn | Out-Null',
+        'Start-Sleep -Seconds 3',
+        'schtasks /delete /tn $tn /f | Out-Null',
+        'Remove-Item $xmlF, $ps1F -Force -ErrorAction SilentlyContinue',
     ]
-    remote_script = "\n".join(remote_lines)
-    remote_b64    = _b64.b64encode(remote_script.encode("utf-8")).decode("ascii")
-
-    # Script esterno: si connette via WinRM al PC remoto ed esegue lo script remoto
-    outer_lines = [
-        "$ProgressPreference = 'SilentlyContinue'",
-        "$WarningPreference  = 'SilentlyContinue'",
-        f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force",
-        f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)",
-        f"$remoteScript = [scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{remote_b64}')))",
-        f"$b64 = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred -ScriptBlock $remoteScript",
-        "Write-Output $b64",
-    ]
-    outer_ps = "\n".join(outer_lines)
+    orch_script = "\n".join(orch_lines)
+    orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
 
     try:
-        enc = _b64.b64encode(outer_ps.encode("utf-16-le")).decode("ascii")
-        r   = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-            capture_output=True, text=True, timeout=90
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            err = _ps_err(r.stderr) or "Screenshot non disponibile (WinRM abilitato sul PC?)"
-            return jsonify({"error": err}), 500
-        lines    = [l for l in r.stdout.splitlines() if l.strip()]
-        b64_line = lines[-1] if lines else ""
-        if not b64_line:
-            return jsonify({"error": "Nessun output base64 dallo screenshot"}), 500
-        img_bytes = _b64.b64decode(b64_line)
+        import wmi as wmilib, pythoncom
+        pythoncom.CoInitialize()
+        try:
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            # Avvia lo script di orchestrazione in Session 0 — ritorna subito
+            res, _pid = c.Win32_Process.Create(
+                CommandLine=(
+                    f'powershell -NoProfile -NonInteractive -WindowStyle Hidden '
+                    f'-EncodedCommand {orch_enc}'
+                )
+            )
+            if res != 0:
+                return jsonify({"error": f"Win32_Process.Create fallito (codice {res})"}), 500
+        finally:
+            pythoncom.CoUninitialize()
+
+        # Attende che il PC posti lo screenshot (max 30s)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.5)
+            with _screenshot_lock:
+                entry = _screenshot_results.get(hostname, {})
+                if entry.get("done") and entry.get("data"):
+                    b64_data = entry.pop("data")
+                    _screenshot_results.pop(hostname, None)
+                    break
+        else:
+            with _screenshot_lock:
+                _screenshot_results.pop(hostname, None)
+            return jsonify({"error": "Timeout: screenshot non ricevuto in 30s"}), 500
+
+        img_bytes = _b64.b64decode(b64_data)
         return Response(img_bytes, mimetype="image/jpeg")
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timeout (>90s)"}), 500
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        with _screenshot_lock:
+            _screenshot_results.pop(hostname, None)
+        return jsonify({"error": _wmi_friendly_error(e)}), 500
 
 
 @app.route("/api/ping/<hostname>", methods=["GET"])
