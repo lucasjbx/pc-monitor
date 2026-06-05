@@ -430,6 +430,21 @@ def get_static_wmi(pc: dict) -> dict:
     return result
 
 
+def _ps_err(stderr: str) -> str:
+    """Estrae il messaggio leggibile dallo stderr PowerShell (gestisce formato CLIXML)."""
+    if not stderr:
+        return ""
+    s = stderr.strip()
+    if s.startswith("#< CLIXML"):
+        m = re.search(r'<S S="Error">(.*?)</S>', s, re.DOTALL)
+        if m:
+            txt = m.group(1)
+            txt = re.sub(r'_x[0-9A-Fa-f]{4}_', ' ', txt)
+            return txt.strip().splitlines()[0]
+        return "Errore PowerShell non decodificabile"
+    return s.splitlines()[0]
+
+
 def _wmi_friendly_error(exc: Exception) -> str:
     """
     Converte le eccezioni WMI/COM in messaggi leggibili.
@@ -759,6 +774,138 @@ def rdp_file(hostname: str):
         headers={"Content-Disposition": f'attachment; filename="{hostname}.rdp"'}
     )
 
+@app.route("/api/processes/<hostname>")
+@require_auth
+def get_processes(hostname: str):
+    """Restituisce i top 15 processi per CPU tramite WMI (Win32_PerfFormattedData_PerfProc_Process)."""
+    cfg      = get_cfg()
+    pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    target   = get_wmi_target(pc)
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return jsonify({"error": "Credenziali WMI non configurate"}), 400
+    try:
+        import wmi as wmilib
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            c     = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            procs = c.Win32_PerfFormattedData_PerfProc_Process()
+            result = []
+            for p in procs:
+                name = p.Name or ""
+                if name in ("_Total", "Idle", ""):
+                    continue
+                result.append({
+                    "name": name,
+                    "pid":  int(p.IDProcess or 0),
+                    "cpu":  int(p.PercentProcessorTime or 0),
+                    "mem":  round(int(p.WorkingSetPrivate or 0) / 1048576, 1),
+                })
+            result.sort(key=lambda x: x["cpu"], reverse=True)
+            return jsonify({"processes": result[:15]})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        return jsonify({"error": _wmi_friendly_error(e)}), 500
+
+
+@app.route("/api/kill-process/<hostname>/<int:pid>", methods=["POST"])
+@require_auth
+def kill_process(hostname: str, pid: int):
+    """Termina un processo sul PC remoto tramite WMI (Win32_Process.Terminate)."""
+    cfg      = get_cfg()
+    pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    target   = get_wmi_target(pc)
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return jsonify({"error": "Credenziali WMI non configurate"}), 400
+    try:
+        import wmi as wmilib
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            procs = c.Win32_Process(ProcessId=pid)
+            if not procs:
+                return jsonify({"error": f"Processo {pid} non trovato"}), 404
+            procs[0].Terminate()
+            return jsonify({"ok": True, "pid": pid})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        return jsonify({"error": _wmi_friendly_error(e)}), 500
+
+
+@app.route("/api/screenshot/<hostname>")
+@require_auth
+def get_screenshot(hostname: str):
+    """
+    Cattura lo schermo del PC remoto via WinRM (PSRemoting) e lo restituisce come JPEG.
+    Prerequisito: WinRM abilitato sui PC target (via GPO o winrm quickconfig).
+    """
+    import base64 as _b64
+    cfg      = get_cfg()
+    pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    target   = get_wmi_target(pc)
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return jsonify({"error": "Credenziali WMI non configurate"}), 400
+
+    def _esc(s):
+        return (s or "").replace("'", "''")
+
+    try:
+        ps = (
+            # Sopprime progress/warning per avere stdout pulito (solo base64)
+            f"$ProgressPreference = 'SilentlyContinue'\n"
+            f"$WarningPreference  = 'SilentlyContinue'\n"
+            f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force\n"
+            f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)\n"
+            f"$b64  = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred "
+            f"-ScriptBlock {{\n"
+            f"  Add-Type -AssemblyName System.Windows.Forms\n"
+            f"  Add-Type -AssemblyName System.Drawing\n"
+            f"  $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
+            f"  $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
+            f"  $g = [System.Drawing.Graphics]::FromImage($b)\n"
+            f"  $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
+            f"  $m = New-Object System.IO.MemoryStream\n"
+            f"  $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
+            f"  [Convert]::ToBase64String($m.ToArray())\n"
+            f"}}\n"
+            f"Write-Output $b64"
+        )
+        enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+        r   = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            err = _ps_err(r.stderr) or "Screenshot non disponibile (WinRM abilitato sul PC?)"
+            return jsonify({"error": err}), 500
+        # Prende l'ultima riga non vuota (ignora eventuali righe extra di output PS)
+        lines   = [l for l in r.stdout.splitlines() if l.strip()]
+        b64_line = lines[-1] if lines else ""
+        if not b64_line:
+            return jsonify({"error": "Nessun output base64 dallo screenshot"}), 500
+        img_bytes = _b64.b64decode(b64_line)
+        return Response(img_bytes, mimetype="image/jpeg")
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout — acquisizione troppo lenta (>60s)"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/ping/<hostname>", methods=["GET"])
 @require_auth
 def ping_single(hostname: str):
@@ -803,21 +950,6 @@ def ad_computers():
         """Escape single quotes per stringhe letterali PowerShell."""
         return (s or "").replace("'", "''")
 
-    def _ps_err(stderr: str) -> str:
-        """Estrae il messaggio leggibile dallo stderr PowerShell (gestisce formato CLIXML)."""
-        if not stderr:
-            return ""
-        s = stderr.strip()
-        if s.startswith("#< CLIXML"):
-            # PowerShell serializza gli errori in XML: estrai il primo tag <S S="Error">
-            m = re.search(r'<S S="Error">(.*?)</S>', s, re.DOTALL)
-            if m:
-                txt = m.group(1)
-                # Decodifica sequenze escape XML di PowerShell (_x000D_ = CR, _x000A_ = LF)
-                txt = re.sub(r'_x[0-9A-Fa-f]{4}_', ' ', txt)
-                return txt.strip().splitlines()[0]
-            return "Errore PowerShell non decodificabile"
-        return s.splitlines()[0]
 
     def _run_ps(script: str):
         """Esegue uno script PowerShell via EncodedCommand (evita problemi di escaping)."""

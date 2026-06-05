@@ -404,6 +404,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // AD import modal
+  document.getElementById('btn-screenshot-close')?.addEventListener('click', () =>
+    document.getElementById('screenshot-modal').classList.add('hidden'));
   document.getElementById('btn-ad-import')?.addEventListener('click', openAdImport);
   document.getElementById('btn-ad-import-close')?.addEventListener('click', () =>
     document.getElementById('ad-import-modal').classList.add('hidden'));
@@ -602,6 +604,9 @@ function renderGridView() {
 function openPanel(pc) {
   selectedHost = pc.hostname;
   renderMarkers();
+  // Azzera la lista processi del pannello precedente
+  const procBox = document.getElementById('panel-processes');
+  if (procBox) { procBox.classList.add('hidden'); procBox.innerHTML = ''; }
   updatePanel(pc);
   document.getElementById('panel').classList.remove('hidden');
 }
@@ -743,6 +748,24 @@ function renderPanelActions(pc) {
     container.appendChild(btn);
   }
 
+  // Processi CPU — on-demand, solo se online
+  if (pc.online) {
+    const btn = document.createElement('button');
+    btn.className   = 'btn-action';
+    btn.textContent = '📋 Processi CPU';
+    btn.addEventListener('click', () => showProcesses(pc.hostname));
+    container.appendChild(btn);
+  }
+
+  // Screenshot — on-demand, solo se online
+  if (pc.online) {
+    const btn = document.createElement('button');
+    btn.className   = 'btn-action';
+    btn.textContent = '📷 Screenshot';
+    btn.addEventListener('click', () => showScreenshot(pc.hostname));
+    container.appendChild(btn);
+  }
+
   if (!pc.ip) {
     const note = document.createElement('p');
     note.className   = 'panel-note';
@@ -755,6 +778,88 @@ function closePanel() {
   selectedHost = null;
   document.getElementById('panel').classList.add('hidden');
   renderMarkers();
+}
+
+// ── Processi CPU on-demand ────────────────────────────────────────────────────
+async function showProcesses(hostname) {
+  const box = document.getElementById('panel-processes');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="panel-loading">Caricamento processi…</div>';
+  try {
+    const res  = await apiFetch(`/api/processes/${hostname}`);
+    const data = await res.json();
+    if (data.error) {
+      box.innerHTML = `<div class="panel-error">${escHtml(data.error)}</div>`;
+      return;
+    }
+    const rows = (data.processes || []).map(p => {
+      const cpuColor = p.cpu > 50 ? '#ef4444' : p.cpu > 20 ? '#f59e0b' : '#22c55e';
+      return `<tr data-pid="${p.pid}" data-name="${escHtml(p.name)}">
+        <td class="proc-name" title="${escHtml(p.name)}">${escHtml(p.name)}</td>
+        <td class="proc-cpu">${barHtml(Math.min(p.cpu, 100), cpuColor)}</td>
+        <td class="proc-mem">${p.mem} MB</td>
+        <td class="proc-kill"><button class="proc-kill-btn" title="Termina processo">✕</button></td>
+      </tr>`;
+    }).join('');
+    box.innerHTML =
+      `<table class="proc-table">
+        <thead><tr><th>Processo</th><th>CPU</th><th>RAM</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    box.querySelectorAll('.proc-kill-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tr   = btn.closest('tr');
+        const pid  = parseInt(tr.dataset.pid);
+        const name = tr.dataset.name;
+        if (confirm(`Terminare "${name}" (PID ${pid})?`))
+          killProcess(hostname, pid, tr);
+      });
+    });
+  } catch {
+    box.innerHTML = '<div class="panel-error">Errore di rete</div>';
+  }
+}
+
+async function killProcess(hostname, pid, rowEl) {
+  rowEl.style.opacity = '0.4';
+  try {
+    const res  = await apiFetch(`/api/kill-process/${hostname}/${pid}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      rowEl.remove();
+    } else {
+      rowEl.style.opacity = '';
+      alert(data.error || 'Errore durante la terminazione del processo');
+    }
+  } catch {
+    rowEl.style.opacity = '';
+    alert('Errore di rete');
+  }
+}
+
+// ── Screenshot on-demand ──────────────────────────────────────────────────────
+async function showScreenshot(hostname) {
+  const modal = document.getElementById('screenshot-modal');
+  const img   = document.getElementById('screenshot-img');
+  const lbl   = document.getElementById('screenshot-lbl');
+  modal.classList.remove('hidden');
+  img.src             = '';
+  img.style.display   = 'none';
+  lbl.textContent     = `${hostname} — acquisizione in corso…`;
+  try {
+    const res = await apiFetch(`/api/screenshot/${hostname}`);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      lbl.textContent = d.error || 'Errore acquisizione';
+      return;
+    }
+    const blob  = await res.blob();
+    img.src     = URL.createObjectURL(blob);
+    img.style.display = 'block';
+    lbl.textContent   = `${hostname} — ${new Date().toLocaleTimeString()}`;
+  } catch {
+    lbl.textContent = 'Errore di rete';
+  }
 }
 
 // ── WOL ───────────────────────────────────────────────────────────────────────

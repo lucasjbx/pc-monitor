@@ -130,6 +130,7 @@
     <div id="panel-badges" class="panel-badges"></div>
     <table id="panel-table" class="panel-table"></table>
     <div id="panel-actions"></div>
+    <div id="panel-processes" class="hidden"></div>
   </div>
 
   <!-- Editor posizioni (full-screen modal) -->
@@ -343,6 +344,19 @@
 
     </div><!-- /editor-container -->
   </div><!-- /settings-overlay -->
+
+  <!-- Modal screenshot PC remoto -->
+  <div id="screenshot-modal" class="modal-overlay hidden">
+    <div class="modal-box screenshot-modal-box">
+      <div class="modal-header">
+        <span id="screenshot-lbl" style="font-size:.85rem;font-weight:600">Screenshot</span>
+        <button class="panel-close" id="btn-screenshot-close">✕</button>
+      </div>
+      <div class="screenshot-body">
+        <img id="screenshot-img" alt="Screenshot">
+      </div>
+    </div>
+  </div>
 
   <!-- Modal import da Active Directory -->
   <div id="ad-import-modal" class="modal-overlay hidden">

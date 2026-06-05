@@ -910,3 +910,40 @@ body {
   border-top: 1px solid #e5e5e3; justify-content: flex-end; flex-shrink: 0;
 }
 .modal-footer .btn-save { width: auto; padding: 8px 18px; font-size: .82rem; }
+
+/* ── Processi CPU inline nel pannello ─────────────────────────────────────── */
+#panel-processes { margin-top: 4px; }
+.proc-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.proc-table thead tr { border-bottom: 1px solid #eee; }
+.proc-table th { font-size: 10px; color: #888; text-align: left; padding: 4px 4px 3px; font-weight: 500; }
+.proc-table td { padding: 3px 4px; border-bottom: 1px solid #f7f7f5; }
+.proc-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-cpu  { width: 88px; }
+.proc-mem  { width: 52px; text-align: right; color: #888; }
+.proc-kill { width: 20px; text-align: center; padding: 0; }
+.proc-kill-btn {
+  background: none; border: none; cursor: pointer;
+  color: #ccc; font-size: 11px; padding: 1px 3px; border-radius: 3px; line-height: 1;
+}
+.proc-kill-btn:hover { color: #ef4444; background: rgba(239,68,68,.1); }
+.panel-loading { font-size: 12px; color: #aaa; padding: 10px 0; text-align: center; }
+.panel-error   { font-size: 11px; color: #ef4444; padding: 8px 0; line-height: 1.4; }
+
+/* ── Modal screenshot ─────────────────────────────────────────────────────── */
+.screenshot-modal-box {
+  width: auto; max-width: 92vw; max-height: 92vh;
+}
+.screenshot-body {
+  overflow: auto; display: flex; align-items: center; justify-content: center;
+  padding: 8px; min-height: 80px; background: #111;
+}
+.screenshot-body img { max-width: 100%; height: auto; display: block; }
+#btn-screenshot-close {
+  position: static;
+  width: 28px; height: 28px; flex-shrink: 0;
+  background: #e5e5e3; color: #333;
+  border: none; border-radius: 50%;
+  font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#btn-screenshot-close:hover { background: #ccc; }
