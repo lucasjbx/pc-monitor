@@ -868,18 +868,24 @@ def get_screenshot(hostname: str):
     def _esc(s):
         return (s or "").replace("'", "''")
 
-    # Script che girerà nella sessione interattiva dell'utente (riceve outFile come $args[0])
+    # Script che girerà nella sessione interattiva dell'utente (riceve outFile come $args[0]).
+    # Usa try/catch per scrivere l'errore su un file .err invece di fallire silenziosamente.
+    # C:\Users\Public è scrivibile da tutti gli utenti (evita problemi di permessi su C:\Windows\Temp).
     inner_script = (
-        "Add-Type -AssemblyName System.Windows.Forms\n"
-        "Add-Type -AssemblyName System.Drawing\n"
         "$outF = $args[0]\n"
-        "$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
-        "$b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
-        "$g = [System.Drawing.Graphics]::FromImage($b)\n"
-        "$g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
-        "$m = New-Object System.IO.MemoryStream\n"
-        "$b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
-        "[Convert]::ToBase64String($m.ToArray()) | Out-File $outF -NoNewline -Encoding ASCII\n"
+        "try {\n"
+        "    Add-Type -AssemblyName System.Windows.Forms\n"
+        "    Add-Type -AssemblyName System.Drawing\n"
+        "    $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
+        "    $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
+        "    $g = [System.Drawing.Graphics]::FromImage($b)\n"
+        "    $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
+        "    $m = New-Object System.IO.MemoryStream\n"
+        "    $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
+        "    [Convert]::ToBase64String($m.ToArray()) | Out-File $outF -NoNewline -Encoding ASCII\n"
+        "} catch {\n"
+        '    $_.Exception.Message | Out-File "${outF}.err" -NoNewline -Encoding ASCII\n'
+        "}\n"
     )
     inner_b64 = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
 
@@ -892,31 +898,39 @@ def get_screenshot(hostname: str):
         "if (-not $proc) { throw 'Nessun utente loggato sul PC' }",
         "$owner    = $proc.GetOwner()",
         '$username = "$($owner.Domain)\\$($owner.User)"',
-        # File temporanei
+        # File temporanei in C:\Users\Public (scrivibile da tutti gli utenti)
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
-        '$outF = "C:\\Windows\\Temp\\pcmon_$rnd.b64"',
-        '$ps1F = "C:\\Windows\\Temp\\pcmon_$rnd.ps1"',
+        '$outF = "C:\\Users\\Public\\pcmon_$rnd.b64"',
+        '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
         # Scrive lo script di screenshot decodificando da base64 (evita problemi di escaping)
         f"$sb64 = '{inner_b64}'",
         "$scriptBytes = [Convert]::FromBase64String($sb64)",
         "[System.IO.File]::WriteAllBytes($ps1F, $scriptBytes)",
         # Task schedulato nell'utente loggato (Interactive = usa token sessione esistente, no password)
+        # -WindowStyle Hidden evita che appaia la finestra PowerShell sullo schermo dell'utente
+        # -RunLevel Limited: non servono privilegi elevati per catturare lo schermo
         '$tn = "PcMonSS_$rnd"',
         '$action    = New-ScheduledTaskAction -Execute "powershell.exe" '
-        '             -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ps1F`" `"$outF`""',
+        '             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`" `"$outF`""',
         "$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)",
-        "$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Highest",
+        "$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited",
         "$task      = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal",
         "Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null",
         "Start-ScheduledTask -TaskName $tn",
-        # Attende il file di output (max 20s)
+        # Attende il file di output o di errore (max 30s)
+        '$errF = "${outF}.err"',
         "$waited = 0",
-        "while (-not (Test-Path $outF) -and $waited -lt 20) {",
+        "while (-not (Test-Path $outF) -and -not (Test-Path $errF) -and $waited -lt 30) {",
         "    Start-Sleep -Milliseconds 500",
         "    $waited += 0.5",
         "}",
         "Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
-        "if (-not (Test-Path $outF)) { throw 'Timeout: screenshot non completato in 20s' }",
+        "if (Test-Path $errF) {",
+        "    $errMsg = Get-Content $errF -Raw",
+        "    Remove-Item $ps1F, $outF, $errF -Force -ErrorAction SilentlyContinue",
+        "    throw \"Errore screenshot: $errMsg\"",
+        "}",
+        "if (-not (Test-Path $outF)) { throw 'Timeout: screenshot non completato in 30s' }",
         "$result = Get-Content $outF -Raw",
         "Remove-Item $ps1F, $outF -Force -ErrorAction SilentlyContinue",
         "$result",
