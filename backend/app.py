@@ -613,8 +613,11 @@ _pc_cache   = []
 _cache_lock = threading.Lock()
 
 # Risultati screenshot in attesa (hostname → {token, done, data})
-_screenshot_results = {}
-_screenshot_lock    = threading.Lock()
+_screenshot_results      = {}
+_screenshot_lock         = threading.Lock()
+# Script di orchestrazione in attesa di download (script_token → testo PS)
+_screenshot_scripts      = {}
+_screenshot_scripts_lock = threading.Lock()
 _poll_event = threading.Event()   # segnala al loop di ripartire subito dopo cambio config
 
 
@@ -847,6 +850,16 @@ def kill_process(hostname: str, pid: int):
         return jsonify({"error": _wmi_friendly_error(e)}), 500
 
 
+@app.route("/api/screenshot-script/<script_token>")
+def screenshot_script(script_token: str):
+    """Serve lo script di orchestrazione una sola volta (token one-time)."""
+    with _screenshot_scripts_lock:
+        script = _screenshot_scripts.pop(script_token, None)
+    if not script:
+        return "", 404
+    return Response(script, mimetype="text/plain; charset=utf-8")
+
+
 @app.route("/api/screenshot-receive", methods=["POST"])
 def screenshot_receive():
     """
@@ -940,33 +953,28 @@ def get_screenshot(hostname: str):
     inner_script = "\n".join(inner_lines)
     inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
 
-    # Script di orchestrazione (gira in Session 0 via WMI Win32_Process.Create):
-    # usa la COM API di Schedule.Service (non dipende da cmdlets PS, funziona da Session 0).
-    # Scrive C:\Users\Public\pcmon_orch.txt con i passi eseguiti per diagnostica.
+    # Script di orchestrazione: non viene più codificato nella CommandLine
+    # (troppo lungo → Win32_Process.Create codice 2).
+    # Viene servito dall'app server via HTTP con token one-time; la CommandLine
+    # è solo ~150 chars e scarica + esegue lo script.
     orch_lines = [
         "$ProgressPreference = 'SilentlyContinue'",
-        "$dbg = 'C:\\Users\\Public\\pcmon_orch.txt'",
-        '"$(Get-Date -f HH:mm:ss) START" | Out-File $dbg -Append',
         "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
-        'if (-not $proc) { "$(Get-Date -f HH:mm:ss) NO explorer.exe" | Out-File $dbg -Append; exit 1 }',
+        "if (-not $proc) { exit 1 }",
         "$owner    = $proc.GetOwner()",
         '$username = "$($owner.Domain)\\$($owner.User)"',
-        '"$(Get-Date -f HH:mm:ss) utente=$username" | Out-File $dbg -Append',
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
         '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
         '$vbsF = "C:\\Users\\Public\\pcmon_$rnd.vbs"',
         '$tn   = "PcMonSS_$rnd"',
         f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
-        '"$(Get-Date -f HH:mm:ss) PS1=$ps1F" | Out-File $dbg -Append',
-        # VBScript launcher: wscript.exe con finestra=0 (SW_HIDE) è la tecnica
-        # più affidabile per nascondere la finestra a livello Win32
+        # VBScript launcher con SW_HIDE (0) — finestra mai visibile a livello Win32
         '$vbs = @"',
         'Set sh = CreateObject("WScript.Shell")',
         'sh.Run "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""$ps1F""", 0, False',
         '"@',
         '[System.IO.File]::WriteAllText($vbsF, $vbs, [System.Text.Encoding]::ASCII)',
-        '"$(Get-Date -f HH:mm:ss) VBS=$vbsF" | Out-File $dbg -Append',
-        # COM API di Task Scheduler — più affidabile di Register-ScheduledTask da Session 0
+        # COM API Task Scheduler con InteractiveToken (sessione utente, no password)
         "try {",
         "    $svc = New-Object -ComObject Schedule.Service",
         "    $svc.Connect()",
@@ -974,41 +982,40 @@ def get_screenshot(hostname: str):
         "    $def = $svc.NewTask(0)",
         "    $def.Settings.Hidden     = $true",
         "    $def.Principal.UserId    = $username",
-        "    $def.Principal.LogonType = 3",   # TASK_LOGON_INTERACTIVE_TOKEN
-        "    $def.Principal.RunLevel  = 0",   # TASK_RUNLEVEL_LUA
-        "    $act = $def.Actions.Create(0)",  # TASK_ACTION_EXEC
+        "    $def.Principal.LogonType = 3",
+        "    $def.Principal.RunLevel  = 0",
+        "    $act = $def.Actions.Create(0)",
         "    $act.Path      = 'wscript.exe'",
         '    $act.Arguments = "`"$vbsF`""',
         "    $fld.RegisterTaskDefinition($tn, $def, 6, $null, $null, 3) | Out-Null",
-        '    "$(Get-Date -f HH:mm:ss) task registrato" | Out-File $dbg -Append',
         "    $t = $fld.GetTask(\"\\$tn\")",
         "    $t.Run($null) | Out-Null",
-        '    "$(Get-Date -f HH:mm:ss) task avviato" | Out-File $dbg -Append',
         "    Start-Sleep -Seconds 5",
         "    $fld.DeleteTask($tn, 0)",
-        '    "$(Get-Date -f HH:mm:ss) task eliminato" | Out-File $dbg -Append',
-        "} catch {",
-        '    "$(Get-Date -f HH:mm:ss) ERRORE: $_" | Out-File $dbg -Append',
-        "}",
+        "} catch {}",
         "Remove-Item $ps1F, $vbsF -Force -ErrorAction SilentlyContinue",
     ]
-    orch_script = "\n".join(orch_lines)
-    orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
+    orch_script  = "\n".join(orch_lines)
+    script_token = _sec.token_hex(16)
+    with _screenshot_scripts_lock:
+        _screenshot_scripts[script_token] = orch_script
+    script_url  = f"http://{server_ip}:5000/api/screenshot-script/{script_token}"
+    # CommandLine corta: scarica ed esegue lo script dall'app server
+    short_cmd = (
+        f'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command '
+        f'"(New-Object Net.WebClient).DownloadString(\'{script_url}\') | Invoke-Expression"'
+    )
 
     try:
         import wmi as wmilib, pythoncom
         pythoncom.CoInitialize()
         try:
             c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-            # Avvia lo script di orchestrazione in Session 0 — ritorna subito.
-            # Win32_Process.Create restituisce (ProcessId, ReturnValue).
-            _pid, ret = c.Win32_Process.Create(
-                CommandLine=(
-                    f'powershell -NoProfile -NonInteractive -WindowStyle Hidden '
-                    f'-EncodedCommand {orch_enc}'
-                )
-            )
+            # Win32_Process.Create restituisce (ProcessId, ReturnValue)
+            _pid, ret = c.Win32_Process.Create(CommandLine=short_cmd)
             if ret != 0:
+                with _screenshot_scripts_lock:
+                    _screenshot_scripts.pop(script_token, None)
                 return jsonify({"error": f"Win32_Process.Create fallito (codice {ret})"}), 500
         finally:
             pythoncom.CoUninitialize()
