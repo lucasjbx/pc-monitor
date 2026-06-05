@@ -884,13 +884,18 @@ def screenshot_receive():
 @require_auth
 def get_screenshot(hostname: str):
     """
-    Cattura lo schermo del PC remoto usando solo WMI (nessun WinRM richiesto).
+    Cattura lo schermo del PC remoto via Schedule.Service COM.
+    Nessun WinRM, nessun Win32_Process.Create.
     Flusso:
-      1. WMI crea un Task Schedulato con InteractiveToken (sessione utente, no password)
-      2. Lo script cattura lo schermo e posta il JPEG via HTTP all'app server
-      3. L'endpoint /api/screenshot-receive riceve i dati e sveglia questo thread
+      1. WMI trova l'utente loggato (explorer.exe)
+      2. Python si connette al Task Scheduler remoto via Schedule.Service.Connect
+         usando le credenziali WMI (bypassa Win32_Process.Create Access Denied)
+      3. Crea un task InteractiveToken: scarica ed esegue lo script di cattura
+         dall'app server (HTTP, token one-time)
+      4. Lo script posta il JPEG a /api/screenshot-receive
     """
     import base64 as _b64
+    import secrets as _sec
 
     cfg      = get_cfg()
     pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
@@ -902,28 +907,21 @@ def get_screenshot(hostname: str):
     if not wmi_user or not wmi_pass:
         return jsonify({"error": "Credenziali WMI non configurate"}), 400
 
-    import base64 as _b64
-    import secrets as _sec
-
-    # IP del server app (quello che i PC remoti usano per aprire l'UI)
     gateway   = cfg.get("network", {}).get("gateway_ip", "")
     server_ip = get_local_ip(gateway) if gateway else ""
     if not server_ip or server_ip == "0.0.0.0":
-        return jsonify({"error": "IP server non determinabile (configura gateway_ip in Impostazioni → Rete)"}), 500
+        return jsonify({"error": "IP server non determinabile (configura gateway_ip)"}), 500
     server_url = f"http://{server_ip}:5000/api/screenshot-receive"
 
-    # Token one-time per questa richiesta
     token = _sec.token_hex(16)
     with _screenshot_lock:
         _screenshot_results[hostname] = {"token": token, "done": False, "data": None}
 
-    # Script che gira nella sessione interattiva dell'utente:
-    # cattura lo schermo e lo posta via HTTP all'app server.
-    # In caso di errore scrive C:\Users\Public\pcmon_debug.txt per diagnosi.
+    # Script PS che gira nella sessione interattiva dell'utente:
+    # cattura schermo e posta via HTTP all'app server
     inner_lines = [
         f"$url   = '{server_url}'",
         f"$token = '{token}'",
-        "$dbg   = 'C:\\Users\\Public\\pcmon_debug.txt'",
         "try {",
         "    Add-Type -AssemblyName System.Windows.Forms",
         "    Add-Type -AssemblyName System.Drawing",
@@ -938,89 +936,72 @@ def get_screenshot(hostname: str):
         "    $req  = [System.Net.WebRequest]::Create($url)",
         "    $req.Method      = 'POST'",
         "    $req.ContentType = 'application/json'",
-        "    $req.Proxy       = New-Object System.Net.WebProxy  # bypassa proxy",
+        "    $req.Proxy       = New-Object System.Net.WebProxy",
         "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
         "    $req.ContentLength = $bytes.Length",
         "    $stream = $req.GetRequestStream()",
         "    $stream.Write($bytes, 0, $bytes.Length)",
         "    $stream.Close()",
         "    $req.GetResponse().Close()",
-        "    \"$(Get-Date) OK: POST inviato ($($bytes.Length) bytes)\" | Out-File $dbg -Append",
-        "} catch {",
-        "    \"$(Get-Date) ERRORE: $_\" | Out-File $dbg -Append",
-        "}",
+        "} catch {}",
     ]
     inner_script = "\n".join(inner_lines)
-    inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
-
-    # Script di orchestrazione: non viene più codificato nella CommandLine
-    # (troppo lungo → Win32_Process.Create codice 2).
-    # Viene servito dall'app server via HTTP con token one-time; la CommandLine
-    # è solo ~150 chars e scarica + esegue lo script.
-    orch_lines = [
-        "$ProgressPreference = 'SilentlyContinue'",
-        "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
-        "if (-not $proc) { exit 1 }",
-        "$owner    = $proc.GetOwner()",
-        '$username = "$($owner.Domain)\\$($owner.User)"',
-        "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
-        '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
-        '$vbsF = "C:\\Users\\Public\\pcmon_$rnd.vbs"',
-        '$tn   = "PcMonSS_$rnd"',
-        f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
-        # VBScript launcher con SW_HIDE (0) — finestra mai visibile a livello Win32
-        '$vbs = @"',
-        'Set sh = CreateObject("WScript.Shell")',
-        'sh.Run "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""$ps1F""", 0, False',
-        '"@',
-        '[System.IO.File]::WriteAllText($vbsF, $vbs, [System.Text.Encoding]::ASCII)',
-        # COM API Task Scheduler con InteractiveToken (sessione utente, no password)
-        "try {",
-        "    $svc = New-Object -ComObject Schedule.Service",
-        "    $svc.Connect()",
-        "    $fld = $svc.GetFolder('\\')",
-        "    $def = $svc.NewTask(0)",
-        "    $def.Settings.Hidden     = $true",
-        "    $def.Principal.UserId    = $username",
-        "    $def.Principal.LogonType = 3",
-        "    $def.Principal.RunLevel  = 0",
-        "    $act = $def.Actions.Create(0)",
-        "    $act.Path      = 'wscript.exe'",
-        '    $act.Arguments = "`"$vbsF`""',
-        "    $fld.RegisterTaskDefinition($tn, $def, 6, $null, $null, 3) | Out-Null",
-        "    $t = $fld.GetTask(\"\\$tn\")",
-        "    $t.Run($null) | Out-Null",
-        "    Start-Sleep -Seconds 5",
-        "    $fld.DeleteTask($tn, 0)",
-        "} catch {}",
-        "Remove-Item $ps1F, $vbsF -Force -ErrorAction SilentlyContinue",
-    ]
-    orch_script  = "\n".join(orch_lines)
-    script_token = _sec.token_hex(16)
+    inner_token  = _sec.token_hex(16)
+    inner_url    = f"http://{server_ip}:5000/api/screenshot-script/{inner_token}"
     with _screenshot_scripts_lock:
-        _screenshot_scripts[script_token] = orch_script
-    script_url  = f"http://{server_ip}:5000/api/screenshot-script/{script_token}"
-    # CommandLine corta: scarica ed esegue lo script dall'app server
-    short_cmd = (
-        f'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command '
-        f'"(New-Object Net.WebClient).DownloadString(\'{script_url}\') | Invoke-Expression"'
-    )
+        _screenshot_scripts[inner_token] = inner_script
 
+    # Separa dominio e utente WMI (es. STAGIT\user → domain=STAGIT, user=user)
+    if "\\" in wmi_user:
+        wmi_domain, wmi_user_only = wmi_user.split("\\", 1)
+    else:
+        wmi_domain, wmi_user_only = "", wmi_user
+
+    task_name = None
     try:
-        import wmi as wmilib, pythoncom
+        import wmi as wmilib, pythoncom, win32com.client
         pythoncom.CoInitialize()
         try:
+            # Trova utente loggato tramite WMI
             c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-            # Win32_Process.Create restituisce (ProcessId, ReturnValue)
-            _pid, ret = c.Win32_Process.Create(CommandLine=short_cmd)
-            if ret != 0:
-                with _screenshot_scripts_lock:
-                    _screenshot_scripts.pop(script_token, None)
-                return jsonify({"error": f"Win32_Process.Create fallito (codice {ret})"}), 500
+            logged_user = ""
+            for proc in c.Win32_Process(Name="explorer.exe"):
+                owner = proc.GetOwner()
+                if owner[1] == 0 and owner[2]:
+                    dom = owner[0] or ""
+                    logged_user = f"{dom}\\{owner[2]}" if dom else owner[2]
+                    break
+            if not logged_user:
+                return jsonify({"error": "Nessun utente loggato sul PC"}), 400
+
+            # Connessione diretta al Task Scheduler remoto con credenziali WMI
+            sched = win32com.client.Dispatch("Schedule.Service")
+            sched.Connect(target, wmi_user_only, wmi_domain, wmi_pass)
+            folder = sched.GetFolder("\\")
+
+            rnd       = _sec.token_hex(6)
+            task_name = f"PcMonSS_{rnd}"
+            task_def  = sched.NewTask(0)
+            task_def.Settings.Hidden     = True
+            task_def.Principal.UserId    = logged_user
+            task_def.Principal.LogonType = 3   # TASK_LOGON_INTERACTIVE_TOKEN
+            task_def.Principal.RunLevel  = 0   # TASK_RUNLEVEL_LUA
+
+            act = task_def.Actions.Create(0)   # TASK_ACTION_EXEC
+            act.Path      = "powershell.exe"
+            act.Arguments = (
+                f"-NoProfile -NonInteractive -WindowStyle Hidden "
+                f"-Command \"(New-Object Net.WebClient).DownloadString('{inner_url}') | iex\""
+            )
+
+            # 6=TASK_CREATE_OR_UPDATE, 3=TASK_LOGON_INTERACTIVE_TOKEN
+            folder.RegisterTaskDefinition(task_name, task_def, 6, None, None, 3)
+            task = folder.GetTask(f"\\{task_name}")
+            task.Run(None)
         finally:
             pythoncom.CoUninitialize()
 
-        # Attende che il PC posti lo screenshot (max 30s)
+        # Attende lo screenshot (max 30s)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1041,7 +1022,25 @@ def get_screenshot(hostname: str):
     except Exception as e:
         with _screenshot_lock:
             _screenshot_results.pop(hostname, None)
-        return jsonify({"error": _wmi_friendly_error(e)}), 500
+        with _screenshot_scripts_lock:
+            _screenshot_scripts.pop(inner_token, None)
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        # Elimina il task schedulato in background
+        if task_name:
+            def _cleanup(tn=task_name):
+                try:
+                    import pythoncom, win32com.client as _wcc
+                    pythoncom.CoInitialize()
+                    s = _wcc.Dispatch("Schedule.Service")
+                    s.Connect(target, wmi_user_only, wmi_domain, wmi_pass)
+                    s.GetFolder("\\").DeleteTask(tn, 0)
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+            threading.Thread(target=_cleanup, daemon=True).start()
+
 
 
 @app.route("/api/ping/<hostname>", methods=["GET"])
