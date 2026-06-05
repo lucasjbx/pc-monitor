@@ -847,10 +847,14 @@ def kill_process(hostname: str, pid: int):
 @require_auth
 def get_screenshot(hostname: str):
     """
-    Cattura lo schermo del PC remoto via WinRM (PSRemoting) e lo restituisce come JPEG.
-    Prerequisito: WinRM abilitato sui PC target (via GPO o winrm quickconfig).
+    Cattura lo schermo del PC remoto via WinRM + Task Scheduler.
+    WinRM opera in Session 0 (non-interattiva) e non può accedere al desktop dell'utente.
+    La soluzione: uno script PowerShell gira nella sessione interattiva dell'utente loggato
+    tramite un Task Schedulato con LogonType=Interactive (non richiede password).
+    Prerequisito: WinRM abilitato sui PC target.
     """
     import base64 as _b64
+
     cfg      = get_cfg()
     pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
     if not pc:
@@ -864,44 +868,91 @@ def get_screenshot(hostname: str):
     def _esc(s):
         return (s or "").replace("'", "''")
 
+    # Script che girerà nella sessione interattiva dell'utente (riceve outFile come $args[0])
+    inner_script = (
+        "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
+        "$outF = $args[0]\n"
+        "$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
+        "$b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
+        "$g = [System.Drawing.Graphics]::FromImage($b)\n"
+        "$g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
+        "$m = New-Object System.IO.MemoryStream\n"
+        "$b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
+        "[Convert]::ToBase64String($m.ToArray()) | Out-File $outF -NoNewline -Encoding ASCII\n"
+    )
+    inner_b64 = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
+
+    # Script remoto: crea task schedulato nell'utente loggato, attende il file di output
+    remote_lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "$ProgressPreference    = 'SilentlyContinue'",
+        # Trova l'utente loggato tramite explorer.exe
+        "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
+        "if (-not $proc) { throw 'Nessun utente loggato sul PC' }",
+        "$owner    = $proc.GetOwner()",
+        '$username = "$($owner.Domain)\\$($owner.User)"',
+        # File temporanei
+        "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
+        '$outF = "C:\\Windows\\Temp\\pcmon_$rnd.b64"',
+        '$ps1F = "C:\\Windows\\Temp\\pcmon_$rnd.ps1"',
+        # Scrive lo script di screenshot decodificando da base64 (evita problemi di escaping)
+        f"$sb64 = '{inner_b64}'",
+        "$scriptBytes = [Convert]::FromBase64String($sb64)",
+        "[System.IO.File]::WriteAllBytes($ps1F, $scriptBytes)",
+        # Task schedulato nell'utente loggato (Interactive = usa token sessione esistente, no password)
+        '$tn = "PcMonSS_$rnd"',
+        '$action    = New-ScheduledTaskAction -Execute "powershell.exe" '
+        '             -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ps1F`" `"$outF`""',
+        "$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)",
+        "$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Highest",
+        "$task      = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal",
+        "Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null",
+        "Start-ScheduledTask -TaskName $tn",
+        # Attende il file di output (max 20s)
+        "$waited = 0",
+        "while (-not (Test-Path $outF) -and $waited -lt 20) {",
+        "    Start-Sleep -Milliseconds 500",
+        "    $waited += 0.5",
+        "}",
+        "Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
+        "if (-not (Test-Path $outF)) { throw 'Timeout: screenshot non completato in 20s' }",
+        "$result = Get-Content $outF -Raw",
+        "Remove-Item $ps1F, $outF -Force -ErrorAction SilentlyContinue",
+        "$result",
+    ]
+    remote_script = "\n".join(remote_lines)
+    remote_b64    = _b64.b64encode(remote_script.encode("utf-8")).decode("ascii")
+
+    # Script esterno: si connette via WinRM al PC remoto ed esegue lo script remoto
+    outer_lines = [
+        "$ProgressPreference = 'SilentlyContinue'",
+        "$WarningPreference  = 'SilentlyContinue'",
+        f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force",
+        f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)",
+        f"$remoteScript = [scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{remote_b64}')))",
+        f"$b64 = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred -ScriptBlock $remoteScript",
+        "Write-Output $b64",
+    ]
+    outer_ps = "\n".join(outer_lines)
+
     try:
-        ps = (
-            # Sopprime progress/warning per avere stdout pulito (solo base64)
-            f"$ProgressPreference = 'SilentlyContinue'\n"
-            f"$WarningPreference  = 'SilentlyContinue'\n"
-            f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force\n"
-            f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)\n"
-            f"$b64  = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred "
-            f"-ScriptBlock {{\n"
-            f"  Add-Type -AssemblyName System.Windows.Forms\n"
-            f"  Add-Type -AssemblyName System.Drawing\n"
-            f"  $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
-            f"  $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
-            f"  $g = [System.Drawing.Graphics]::FromImage($b)\n"
-            f"  $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
-            f"  $m = New-Object System.IO.MemoryStream\n"
-            f"  $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
-            f"  [Convert]::ToBase64String($m.ToArray())\n"
-            f"}}\n"
-            f"Write-Output $b64"
-        )
-        enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+        enc = _b64.b64encode(outer_ps.encode("utf-16-le")).decode("ascii")
         r   = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=90
         )
         if r.returncode != 0 or not r.stdout.strip():
             err = _ps_err(r.stderr) or "Screenshot non disponibile (WinRM abilitato sul PC?)"
             return jsonify({"error": err}), 500
-        # Prende l'ultima riga non vuota (ignora eventuali righe extra di output PS)
-        lines   = [l for l in r.stdout.splitlines() if l.strip()]
+        lines    = [l for l in r.stdout.splitlines() if l.strip()]
         b64_line = lines[-1] if lines else ""
         if not b64_line:
             return jsonify({"error": "Nessun output base64 dallo screenshot"}), 500
         img_bytes = _b64.b64decode(b64_line)
         return Response(img_bytes, mimetype="image/jpeg")
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timeout — acquisizione troppo lenta (>60s)"}), 500
+        return jsonify({"error": "Timeout (>90s)"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
