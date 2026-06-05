@@ -798,6 +798,36 @@ def get_processes(hostname: str):
         return jsonify({"error": _wmi_friendly_error(e)}), 500
 
 
+@app.route("/api/kill-process/<hostname>/<int:pid>", methods=["POST"])
+@require_auth
+def kill_process(hostname: str, pid: int):
+    """Termina un processo sul PC remoto tramite WMI (Win32_Process.Terminate)."""
+    cfg      = get_cfg()
+    pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    target   = get_wmi_target(pc)
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return jsonify({"error": "Credenziali WMI non configurate"}), 400
+    try:
+        import wmi as wmilib
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            procs = c.Win32_Process(ProcessId=pid)
+            if not procs:
+                return jsonify({"error": f"Processo {pid} non trovato"}), 404
+            procs[0].Terminate()
+            return jsonify({"ok": True, "pid": pid})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        return jsonify({"error": _wmi_friendly_error(e)}), 500
+
+
 @app.route("/api/screenshot/<hostname>")
 @require_auth
 def get_screenshot(hostname: str):

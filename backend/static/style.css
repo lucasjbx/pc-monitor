@@ -920,6 +920,12 @@ body {
 .proc-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proc-cpu  { width: 88px; }
 .proc-mem  { width: 52px; text-align: right; color: #888; }
+.proc-kill { width: 20px; text-align: center; padding: 0; }
+.proc-kill-btn {
+  background: none; border: none; cursor: pointer;
+  color: #ccc; font-size: 11px; padding: 1px 3px; border-radius: 3px; line-height: 1;
+}
+.proc-kill-btn:hover { color: #ef4444; background: rgba(239,68,68,.1); }
 .panel-loading { font-size: 12px; color: #aaa; padding: 10px 0; text-align: center; }
 .panel-error   { font-size: 11px; color: #ef4444; padding: 8px 0; line-height: 1.4; }
 

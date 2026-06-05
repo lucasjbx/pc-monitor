@@ -794,19 +794,46 @@ async function showProcesses(hostname) {
     }
     const rows = (data.processes || []).map(p => {
       const cpuColor = p.cpu > 50 ? '#ef4444' : p.cpu > 20 ? '#f59e0b' : '#22c55e';
-      return `<tr>
+      return `<tr data-pid="${p.pid}" data-name="${escHtml(p.name)}">
         <td class="proc-name" title="${escHtml(p.name)}">${escHtml(p.name)}</td>
         <td class="proc-cpu">${barHtml(Math.min(p.cpu, 100), cpuColor)}</td>
         <td class="proc-mem">${p.mem} MB</td>
+        <td class="proc-kill"><button class="proc-kill-btn" title="Termina processo">✕</button></td>
       </tr>`;
     }).join('');
     box.innerHTML =
       `<table class="proc-table">
-        <thead><tr><th>Processo</th><th>CPU</th><th>RAM</th></tr></thead>
+        <thead><tr><th>Processo</th><th>CPU</th><th>RAM</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+    box.querySelectorAll('.proc-kill-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tr   = btn.closest('tr');
+        const pid  = parseInt(tr.dataset.pid);
+        const name = tr.dataset.name;
+        if (confirm(`Terminare "${name}" (PID ${pid})?`))
+          killProcess(hostname, pid, tr);
+      });
+    });
   } catch {
     box.innerHTML = '<div class="panel-error">Errore di rete</div>';
+  }
+}
+
+async function killProcess(hostname, pid, rowEl) {
+  rowEl.style.opacity = '0.4';
+  try {
+    const res  = await apiFetch(`/api/kill-process/${hostname}/${pid}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      rowEl.remove();
+    } else {
+      rowEl.style.opacity = '';
+      alert(data.error || 'Errore durante la terminazione del processo');
+    }
+  } catch {
+    rowEl.style.opacity = '';
+    alert('Errore di rete');
   }
 }
 
