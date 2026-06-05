@@ -906,10 +906,11 @@ def get_screenshot(hostname: str):
 
     # Script che gira nella sessione interattiva dell'utente:
     # cattura lo schermo e lo posta via HTTP all'app server.
-    # Usa JSON manuale per evitare overhead di ConvertTo-Json su payload grande.
+    # In caso di errore scrive C:\Users\Public\pcmon_debug.txt per diagnosi.
     inner_lines = [
         f"$url   = '{server_url}'",
         f"$token = '{token}'",
+        "$dbg   = 'C:\\Users\\Public\\pcmon_debug.txt'",
         "try {",
         "    Add-Type -AssemblyName System.Windows.Forms",
         "    Add-Type -AssemblyName System.Drawing",
@@ -924,20 +925,23 @@ def get_screenshot(hostname: str):
         "    $req  = [System.Net.WebRequest]::Create($url)",
         "    $req.Method      = 'POST'",
         "    $req.ContentType = 'application/json'",
+        "    $req.Proxy       = New-Object System.Net.WebProxy  # bypassa proxy",
         "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
         "    $req.ContentLength = $bytes.Length",
         "    $stream = $req.GetRequestStream()",
         "    $stream.Write($bytes, 0, $bytes.Length)",
         "    $stream.Close()",
-        "    $req.GetResponse() | Out-Null",
-        "} catch {}",
+        "    $req.GetResponse().Close()",
+        "    \"$(Get-Date) OK: POST inviato ($($bytes.Length) bytes)\" | Out-File $dbg -Append",
+        "} catch {",
+        "    \"$(Get-Date) ERRORE: $_\" | Out-File $dbg -Append",
+        "}",
     ]
     inner_script = "\n".join(inner_lines)
     inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
 
     # Script di orchestrazione (gira in Session 0 via WMI Win32_Process.Create):
-    # trova l'utente loggato, scrive PS1 + XML task, registra e avvia il task.
-    # InteractiveToken = gira nella sessione dell'utente senza bisogno della sua password.
+    # trova l'utente loggato, scrive PS1, registra task con InteractiveToken e lo avvia.
     orch_lines = [
         "$ErrorActionPreference = 'SilentlyContinue'",
         "$ProgressPreference    = 'SilentlyContinue'",
@@ -947,36 +951,18 @@ def get_screenshot(hostname: str):
         '$username = "$($owner.Domain)\\$($owner.User)"',
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
         '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
-        '$xmlF = "C:\\Users\\Public\\pcmon_$rnd.xml"',
         '$tn   = "PcMonSS_$rnd"',
         # Scrive PS1 da base64 (evita ogni problema di escaping)
         f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
-        # Scrive XML del task con InteractiveToken (no password necessaria)
-        '$xml = @"',
-        '<?xml version="1.0" encoding="UTF-16"?>',
-        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
-        '  <Principals><Principal id="A">',
-        '    <UserId>$username</UserId>',
-        '    <LogonType>InteractiveToken</LogonType>',
-        '    <RunLevel>LeastPrivilege</RunLevel>',
-        '  </Principal></Principals>',
-        '  <Settings>',
-        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
-        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
-        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
-        '  </Settings>',
-        '  <Actions Context="A"><Exec>',
-        '    <Command>powershell.exe</Command>',
-        '    <Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$ps1F"</Arguments>',
-        '  </Exec></Actions>',
-        '</Task>',
-        '"@',
-        '$xml | Out-File $xmlF -Encoding Unicode',
-        'schtasks /create /tn $tn /xml $xmlF /f | Out-Null',
-        'schtasks /run /tn $tn | Out-Null',
-        'Start-Sleep -Seconds 3',
-        'schtasks /delete /tn $tn /f | Out-Null',
-        'Remove-Item $xmlF, $ps1F -Force -ErrorAction SilentlyContinue',
+        # Usa Register-ScheduledTask (più affidabile di schtasks /xml)
+        '$action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`""',
+        '$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel LeastPrivilege',
+        '$task      = New-ScheduledTask -Action $action -Principal $principal',
+        'Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null',
+        'Start-ScheduledTask -TaskName $tn',
+        'Start-Sleep -Seconds 5',
+        'Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue | Out-Null',
+        'Remove-Item $ps1F -Force -ErrorAction SilentlyContinue',
     ]
     orch_script = "\n".join(orch_lines)
     orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
