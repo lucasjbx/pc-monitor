@@ -954,22 +954,31 @@ def get_screenshot(hostname: str):
         '"$(Get-Date -f HH:mm:ss) utente=$username" | Out-File $dbg -Append',
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
         '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
+        '$vbsF = "C:\\Users\\Public\\pcmon_$rnd.vbs"',
         '$tn   = "PcMonSS_$rnd"',
         f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
         '"$(Get-Date -f HH:mm:ss) PS1=$ps1F" | Out-File $dbg -Append',
+        # VBScript launcher: wscript.exe con finestra=0 (SW_HIDE) è la tecnica
+        # più affidabile per nascondere la finestra a livello Win32
+        '$vbs = @"',
+        'Set sh = CreateObject("WScript.Shell")',
+        'sh.Run "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""$ps1F""", 0, False',
+        '"@',
+        '[System.IO.File]::WriteAllText($vbsF, $vbs, [System.Text.Encoding]::ASCII)',
+        '"$(Get-Date -f HH:mm:ss) VBS=$vbsF" | Out-File $dbg -Append',
         # COM API di Task Scheduler — più affidabile di Register-ScheduledTask da Session 0
         "try {",
         "    $svc = New-Object -ComObject Schedule.Service",
         "    $svc.Connect()",
         "    $fld = $svc.GetFolder('\\')",
         "    $def = $svc.NewTask(0)",
-        "    $def.Settings.Hidden      = $true",  # nasconde la finestra
+        "    $def.Settings.Hidden     = $true",
         "    $def.Principal.UserId    = $username",
         "    $def.Principal.LogonType = 3",   # TASK_LOGON_INTERACTIVE_TOKEN
         "    $def.Principal.RunLevel  = 0",   # TASK_RUNLEVEL_LUA
         "    $act = $def.Actions.Create(0)",  # TASK_ACTION_EXEC
-        "    $act.Path      = 'powershell.exe'",
-        '    $act.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`""',
+        "    $act.Path      = 'wscript.exe'",
+        '    $act.Arguments = "`"$vbsF`""',
         "    $fld.RegisterTaskDefinition($tn, $def, 6, $null, $null, 3) | Out-Null",
         '    "$(Get-Date -f HH:mm:ss) task registrato" | Out-File $dbg -Append',
         "    $t = $fld.GetTask(\"\\$tn\")",
@@ -981,7 +990,7 @@ def get_screenshot(hostname: str):
         "} catch {",
         '    "$(Get-Date -f HH:mm:ss) ERRORE: $_" | Out-File $dbg -Append',
         "}",
-        "Remove-Item $ps1F -Force -ErrorAction SilentlyContinue",
+        "Remove-Item $ps1F, $vbsF -Force -ErrorAction SilentlyContinue",
     ]
     orch_script = "\n".join(orch_lines)
     orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
