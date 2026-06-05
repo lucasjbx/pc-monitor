@@ -986,15 +986,16 @@ def get_screenshot(hostname: str):
         pythoncom.CoInitialize()
         try:
             c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-            # Avvia lo script di orchestrazione in Session 0 — ritorna subito
-            res, _pid = c.Win32_Process.Create(
+            # Avvia lo script di orchestrazione in Session 0 — ritorna subito.
+            # Win32_Process.Create restituisce (ProcessId, ReturnValue).
+            _pid, ret = c.Win32_Process.Create(
                 CommandLine=(
                     f'powershell -NoProfile -NonInteractive -WindowStyle Hidden '
                     f'-EncodedCommand {orch_enc}'
                 )
             )
-            if res != 0:
-                return jsonify({"error": f"Win32_Process.Create fallito (codice {res})"}), 500
+            if ret != 0:
+                return jsonify({"error": f"Win32_Process.Create fallito (codice {ret})"}), 500
         finally:
             pythoncom.CoUninitialize()
 
