@@ -849,34 +849,44 @@ def get_screenshot(hostname: str):
     def _esc(s):
         return (s or "").replace("'", "''")
 
-    ps = (
-        f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force\n"
-        f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)\n"
-        f"$b64  = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred "
-        f"-ScriptBlock {{\n"
-        f"  Add-Type -AssemblyName System.Windows.Forms\n"
-        f"  Add-Type -AssemblyName System.Drawing\n"
-        f"  $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
-        f"  $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
-        f"  $g = [System.Drawing.Graphics]::FromImage($b)\n"
-        f"  $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
-        f"  $m = New-Object System.IO.MemoryStream\n"
-        f"  $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
-        f"  [Convert]::ToBase64String($m.ToArray())\n"
-        f"}}\n"
-        f"Write-Output $b64"
-    )
-    enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
-    r   = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-        capture_output=True, text=True, timeout=45
-    )
-    if r.returncode != 0 or not r.stdout.strip():
-        err = _ps_err(r.stderr) or "Screenshot non disponibile (WinRM abilitato sul PC?)"
-        return jsonify({"error": err}), 500
     try:
-        img_bytes = _b64.b64decode(r.stdout.strip())
+        ps = (
+            # Sopprime progress/warning per avere stdout pulito (solo base64)
+            f"$ProgressPreference = 'SilentlyContinue'\n"
+            f"$WarningPreference  = 'SilentlyContinue'\n"
+            f"$pass = ConvertTo-SecureString '{_esc(wmi_pass)}' -AsPlainText -Force\n"
+            f"$cred = New-Object PSCredential('{_esc(wmi_user)}', $pass)\n"
+            f"$b64  = Invoke-Command -ComputerName '{_esc(target)}' -Credential $cred "
+            f"-ScriptBlock {{\n"
+            f"  Add-Type -AssemblyName System.Windows.Forms\n"
+            f"  Add-Type -AssemblyName System.Drawing\n"
+            f"  $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds\n"
+            f"  $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)\n"
+            f"  $g = [System.Drawing.Graphics]::FromImage($b)\n"
+            f"  $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)\n"
+            f"  $m = New-Object System.IO.MemoryStream\n"
+            f"  $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Jpeg)\n"
+            f"  [Convert]::ToBase64String($m.ToArray())\n"
+            f"}}\n"
+            f"Write-Output $b64"
+        )
+        enc = _b64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+        r   = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            err = _ps_err(r.stderr) or "Screenshot non disponibile (WinRM abilitato sul PC?)"
+            return jsonify({"error": err}), 500
+        # Prende l'ultima riga non vuota (ignora eventuali righe extra di output PS)
+        lines   = [l for l in r.stdout.splitlines() if l.strip()]
+        b64_line = lines[-1] if lines else ""
+        if not b64_line:
+            return jsonify({"error": "Nessun output base64 dallo screenshot"}), 500
+        img_bytes = _b64.b64decode(b64_line)
         return Response(img_bytes, mimetype="image/jpeg")
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout — acquisizione troppo lenta (>60s)"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
