@@ -963,6 +963,7 @@ def get_screenshot(hostname: str):
         "    $svc.Connect()",
         "    $fld = $svc.GetFolder('\\')",
         "    $def = $svc.NewTask(0)",
+        "    $def.Settings.Hidden      = $true",  # nasconde la finestra
         "    $def.Principal.UserId    = $username",
         "    $def.Principal.LogonType = 3",   # TASK_LOGON_INTERACTIVE_TOKEN
         "    $def.Principal.RunLevel  = 0",   # TASK_RUNLEVEL_LUA
