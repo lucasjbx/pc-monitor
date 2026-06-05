@@ -941,28 +941,46 @@ def get_screenshot(hostname: str):
     inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
 
     # Script di orchestrazione (gira in Session 0 via WMI Win32_Process.Create):
-    # trova l'utente loggato, scrive PS1, registra task con InteractiveToken e lo avvia.
+    # usa la COM API di Schedule.Service (non dipende da cmdlets PS, funziona da Session 0).
+    # Scrive C:\Users\Public\pcmon_orch.txt con i passi eseguiti per diagnostica.
     orch_lines = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        "$ProgressPreference    = 'SilentlyContinue'",
+        "$ProgressPreference = 'SilentlyContinue'",
+        "$dbg = 'C:\\Users\\Public\\pcmon_orch.txt'",
+        '"$(Get-Date -f HH:mm:ss) START" | Out-File $dbg -Append',
         "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
-        "if (-not $proc) { exit 1 }",
+        'if (-not $proc) { "$(Get-Date -f HH:mm:ss) NO explorer.exe" | Out-File $dbg -Append; exit 1 }',
         "$owner    = $proc.GetOwner()",
         '$username = "$($owner.Domain)\\$($owner.User)"',
+        '"$(Get-Date -f HH:mm:ss) utente=$username" | Out-File $dbg -Append',
         "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
         '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
         '$tn   = "PcMonSS_$rnd"',
-        # Scrive PS1 da base64 (evita ogni problema di escaping)
         f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
-        # Usa Register-ScheduledTask (più affidabile di schtasks /xml)
-        '$action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`""',
-        '$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel LeastPrivilege',
-        '$task      = New-ScheduledTask -Action $action -Principal $principal',
-        'Register-ScheduledTask -TaskName $tn -InputObject $task -Force | Out-Null',
-        'Start-ScheduledTask -TaskName $tn',
-        'Start-Sleep -Seconds 5',
-        'Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue | Out-Null',
-        'Remove-Item $ps1F -Force -ErrorAction SilentlyContinue',
+        '"$(Get-Date -f HH:mm:ss) PS1=$ps1F" | Out-File $dbg -Append',
+        # COM API di Task Scheduler — più affidabile di Register-ScheduledTask da Session 0
+        "try {",
+        "    $svc = New-Object -ComObject Schedule.Service",
+        "    $svc.Connect()",
+        "    $fld = $svc.GetFolder('\\')",
+        "    $def = $svc.NewTask(0)",
+        "    $def.Principal.UserId    = $username",
+        "    $def.Principal.LogonType = 3",   # TASK_LOGON_INTERACTIVE_TOKEN
+        "    $def.Principal.RunLevel  = 0",   # TASK_RUNLEVEL_LUA
+        "    $act = $def.Actions.Create(0)",  # TASK_ACTION_EXEC
+        "    $act.Path      = 'powershell.exe'",
+        '    $act.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ps1F`""',
+        "    $fld.RegisterTaskDefinition($tn, $def, 6, $null, $null, 3) | Out-Null",
+        '    "$(Get-Date -f HH:mm:ss) task registrato" | Out-File $dbg -Append',
+        "    $t = $fld.GetTask(\"\\$tn\")",
+        "    $t.Run($null) | Out-Null",
+        '    "$(Get-Date -f HH:mm:ss) task avviato" | Out-File $dbg -Append',
+        "    Start-Sleep -Seconds 5",
+        "    $fld.DeleteTask($tn, 0)",
+        '    "$(Get-Date -f HH:mm:ss) task eliminato" | Out-File $dbg -Append',
+        "} catch {",
+        '    "$(Get-Date -f HH:mm:ss) ERRORE: $_" | Out-File $dbg -Append',
+        "}",
+        "Remove-Item $ps1F -Force -ErrorAction SilentlyContinue",
     ]
     orch_script = "\n".join(orch_lines)
     orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
