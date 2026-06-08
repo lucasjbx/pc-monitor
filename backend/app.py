@@ -974,14 +974,25 @@ def get_screenshot(hostname: str):
             if not logged_user:
                 return jsonify({"error": "Nessun utente loggato sul PC"}), 400
 
-            # Connessione diretta al Task Scheduler remoto con credenziali WMI
-            sched = win32com.client.Dispatch("Schedule.Service")
-            sched.Connect(target, wmi_user_only, wmi_domain, wmi_pass)
-            folder = sched.GetFolder("\\")
+            # Connessione diretta al Task Scheduler remoto con credenziali WMI.
+            # Ogni chiamata COM è isolata in un proprio try/except: l'eccezione
+            # generica di pywin32 non indica il punto di fallimento, quindi la
+            # ripacchettiamo con un prefisso che identifica lo step (utile per
+            # distinguere "non riesco a connettermi" da "non ho i permessi per
+            # registrare il task", es. utente WMI senza diritti di admin locale).
+            def _step(name, fn):
+                try:
+                    return fn()
+                except Exception as step_exc:
+                    raise RuntimeError(f"Schedule.Service [{name}]: {step_exc}") from step_exc
+
+            sched  = _step("Dispatch", lambda: win32com.client.Dispatch("Schedule.Service"))
+            _step("Connect", lambda: sched.Connect(target, wmi_user_only, wmi_domain, wmi_pass))
+            folder = _step("GetFolder", lambda: sched.GetFolder("\\"))
 
             rnd       = _sec.token_hex(6)
             task_name = f"PcMonSS_{rnd}"
-            task_def  = sched.NewTask(0)
+            task_def  = _step("NewTask", lambda: sched.NewTask(0))
             task_def.Settings.Hidden     = True
             task_def.Principal.UserId    = logged_user
             task_def.Principal.LogonType = 3   # TASK_LOGON_INTERACTIVE_TOKEN
@@ -995,9 +1006,10 @@ def get_screenshot(hostname: str):
             )
 
             # 6=TASK_CREATE_OR_UPDATE, 3=TASK_LOGON_INTERACTIVE_TOKEN
-            folder.RegisterTaskDefinition(task_name, task_def, 6, None, None, 3)
-            task = folder.GetTask(f"\\{task_name}")
-            task.Run(None)
+            _step("RegisterTaskDefinition",
+                  lambda: folder.RegisterTaskDefinition(task_name, task_def, 6, None, None, 3))
+            task = _step("GetTask", lambda: folder.GetTask(f"\\{task_name}"))
+            _step("Run", lambda: task.Run(None))
         finally:
             pythoncom.CoUninitialize()
 
