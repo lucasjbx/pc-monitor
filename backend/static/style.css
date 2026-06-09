@@ -30,13 +30,21 @@ body {
 .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 .update-badge {
-  background: #f59e0b; color: #fff;
   border-radius: 12px; padding: 2px 10px;
   font-size: .78em; font-weight: 600;
   cursor: pointer; user-select: none;
   transition: background .15s;
+  color: #fff;
 }
-.update-badge:hover { background: #d97706; }
+/* Aggiornamento disponibile — ambra */
+.update-badge--available            { background: #f59e0b; }
+.update-badge--available:hover      { background: #d97706; }
+/* Sistema aggiornato — verde */
+.update-badge--ok                   { background: #22c55e; }
+.update-badge--ok:hover             { background: #16a34a; }
+/* Stato sconosciuto (GitHub non raggiungibile) — grigio */
+.update-badge--unknown              { background: #6b7280; }
+.update-badge--unknown:hover        { background: #4b5563; }
 
 .update-popover {
   position: absolute; top: 56px; left: 16px;

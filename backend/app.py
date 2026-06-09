@@ -796,21 +796,46 @@ def get_processes(hostname: str):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c     = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-            procs = c.Win32_PerfFormattedData_PerfProc_Process()
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
             result = []
-            for p in procs:
-                name = p.Name or ""
-                if name in ("_Total", "Idle", ""):
-                    continue
-                result.append({
-                    "name": name,
-                    "pid":  int(p.IDProcess or 0),
-                    "cpu":  int(p.PercentProcessorTime or 0),
-                    "mem":  round(int(p.WorkingSetPrivate or 0) / 1048576, 1),
-                })
-            result.sort(key=lambda x: x["cpu"], reverse=True)
-            return jsonify({"processes": result[:15]})
+
+            # Prova prima con Win32_PerfFormattedData (ha CPU%) — non disponibile su tutti i sistemi
+            use_fallback = False
+            try:
+                procs = c.Win32_PerfFormattedData_PerfProc_Process()
+                for p in procs:
+                    name = p.Name or ""
+                    if name in ("_Total", "Idle", ""):
+                        continue
+                    result.append({
+                        "name": name,
+                        "pid":  int(p.IDProcess or 0),
+                        "cpu":  int(p.PercentProcessorTime or 0),
+                        "mem":  round(int(p.WorkingSetPrivate or 0) / 1048576, 1),
+                    })
+            except (Exception, AttributeError) as perf_err:
+                app.logger.warning("Win32_PerfFormattedData non disponibile su %s (%s: %s) — fallback Win32_Process",
+                                   hostname, type(perf_err).__name__, perf_err)
+                use_fallback = True
+
+            if use_fallback:
+                # Fallback: Win32_Process — universale, ma senza CPU% in tempo reale
+                result = []
+                procs = c.Win32_Process()
+                for p in procs:
+                    name = p.Name or ""
+                    if name in ("", "System Idle Process"):
+                        continue
+                    result.append({
+                        "name": name,
+                        "pid":  int(p.ProcessId or 0),
+                        "cpu":  0,
+                        "mem":  round(int(p.WorkingSetSize or 0) / 1048576, 1),
+                    })
+
+            result.sort(key=lambda x: (x["cpu"], x["mem"]), reverse=True)
+            cpu_available = any(p["cpu"] > 0 for p in result)
+            return jsonify({"processes": result[:15], "cpu_available": cpu_available})
         finally:
             pythoncom.CoUninitialize()
     except Exception as e:

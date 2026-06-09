@@ -792,18 +792,28 @@ async function showProcesses(hostname) {
       box.innerHTML = `<div class="panel-error">${escHtml(data.error)}</div>`;
       return;
     }
+    const cpuAvail = data.cpu_available !== false;
+    const cpuHeader = cpuAvail
+      ? '<th>CPU</th>'
+      : '<th title="CPU% non disponibile su questo PC — dati ordinati per RAM">CPU <span style="color:#888;font-weight:normal;font-size:0.8em">⚠ N/D</span></th>';
     const rows = (data.processes || []).map(p => {
-      const cpuColor = p.cpu > 50 ? '#ef4444' : p.cpu > 20 ? '#f59e0b' : '#22c55e';
+      let cpuCell;
+      if (cpuAvail) {
+        const cpuColor = p.cpu > 50 ? '#ef4444' : p.cpu > 20 ? '#f59e0b' : '#22c55e';
+        cpuCell = `<td class="proc-cpu">${barHtml(Math.min(p.cpu, 100), cpuColor)}</td>`;
+      } else {
+        cpuCell = `<td class="proc-cpu" style="color:#888;font-size:0.85em" title="CPU% non disponibile (Performance Counter non accessibile)">—</td>`;
+      }
       return `<tr data-pid="${p.pid}" data-name="${escHtml(p.name)}">
         <td class="proc-name" title="${escHtml(p.name)}">${escHtml(p.name)}</td>
-        <td class="proc-cpu">${barHtml(Math.min(p.cpu, 100), cpuColor)}</td>
+        ${cpuCell}
         <td class="proc-mem">${p.mem} MB</td>
         <td class="proc-kill"><button class="proc-kill-btn" title="Termina processo">✕</button></td>
       </tr>`;
     }).join('');
     box.innerHTML =
       `<table class="proc-table">
-        <thead><tr><th>Processo</th><th>CPU</th><th>RAM</th><th></th></tr></thead>
+        <thead><tr><th>Processo</th>${cpuHeader}<th>RAM</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
     box.querySelectorAll('.proc-kill-btn').forEach(btn => {
@@ -1776,31 +1786,73 @@ function escHtml(s) {
 
 // ── Aggiornamenti ─────────────────────────────────────────────────────────────
 async function checkForUpdates() {
+  const badge = document.getElementById('update-badge');
   try {
     const res  = await apiFetch('/api/update/check');
     if (!res.ok) return;
     const data = await res.json();
-    const badge = document.getElementById('update-badge');
+    badge.classList.remove('hidden');
+    badge.dataset.current = data.current || '';
+    badge.dataset.latest  = data.latest  || data.current || '';
+    badge.dataset.notes   = data.release_notes || '';
     if (data.update_available) {
+      // Ambra: aggiornamento disponibile
       badge.textContent = `↑ v${data.latest}`;
-      badge.classList.remove('hidden');
-      badge.dataset.current = data.current;
-      badge.dataset.latest  = data.latest;
-      badge.dataset.notes   = data.release_notes || '';
+      badge.className   = 'update-badge update-badge--available';
+    } else if (data.error) {
+      // Grigio: impossibile verificare (GitHub non raggiungibile)
+      badge.textContent = `v${data.current}`;
+      badge.className   = 'update-badge update-badge--unknown';
     } else {
-      badge.classList.add('hidden');
+      // Verde: sistema aggiornato
+      badge.textContent = `✓ v${data.current}`;
+      badge.className   = 'update-badge update-badge--ok';
     }
-  } catch (_) {}
+  } catch (_) {
+    // Errore di rete: mostra versione in grigio se possibile
+    badge.classList.remove('hidden');
+    badge.className = 'update-badge update-badge--unknown';
+  }
 }
 
 function openUpdatePopover() {
-  const badge   = document.getElementById('update-badge');
-  const popover = document.getElementById('update-popover');
-  document.getElementById('update-current').textContent = badge.dataset.current || '';
-  document.getElementById('update-latest').textContent  = badge.dataset.latest  || '';
-  const notes = badge.dataset.notes || '';
-  document.getElementById('update-notes').textContent   = notes ? notes : '';
+  const badge      = document.getElementById('update-badge');
+  const popover    = document.getElementById('update-popover');
+  const current    = badge.dataset.current || '';
+  const latest     = badge.dataset.latest  || '';
+  const notes      = badge.dataset.notes   || '';
+  const isAvail    = badge.classList.contains('update-badge--available');
+  const isUnknown  = badge.classList.contains('update-badge--unknown');
+
+  document.getElementById('update-current').textContent = current;
+  document.getElementById('update-latest').textContent  = isAvail ? latest : '—';
+
+  // Riga stato
+  let statusEl = document.getElementById('update-status');
+  if (!statusEl) {
+    statusEl = document.createElement('div');
+    statusEl.id = 'update-status';
+    statusEl.style.cssText = 'font-size:.82em;font-weight:600;margin-bottom:8px;';
+    popover.insertBefore(statusEl, popover.firstChild);
+  }
+  if (isAvail) {
+    statusEl.textContent = '↑ Aggiornamento disponibile';
+    statusEl.style.color = '#d97706';
+  } else if (isUnknown) {
+    statusEl.textContent = '⚠ Impossibile verificare aggiornamenti';
+    statusEl.style.color = '#6b7280';
+  } else {
+    statusEl.textContent = '✓ Sistema aggiornato';
+    statusEl.style.color = '#16a34a';
+  }
+
+  // Note di rilascio
+  document.getElementById('update-notes').textContent   = notes;
   document.getElementById('update-notes').style.display = notes ? '' : 'none';
+
+  // Pulsante "Aggiorna ora" — visibile solo se c'è un update
+  document.getElementById('btn-apply-update').style.display = isAvail ? '' : 'none';
+
   popover.classList.toggle('hidden');
 }
 
