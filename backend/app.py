@@ -426,7 +426,7 @@ def _login_db_get_history(hostname: str, limit: int = 100) -> list:
                 SELECT username, event_type, timestamp, logon_type
                 FROM login_events
                 WHERE hostname = ?
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ?
             """, (hostname, limit)).fetchall()
             return [dict(r) for r in rows]
