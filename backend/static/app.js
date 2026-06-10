@@ -604,9 +604,11 @@ function renderGridView() {
 function openPanel(pc) {
   selectedHost = pc.hostname;
   renderMarkers();
-  // Azzera la lista processi del pannello precedente
+  // Azzera la lista processi e la cronologia accessi del pannello precedente
   const procBox = document.getElementById('panel-processes');
   if (procBox) { procBox.classList.add('hidden'); procBox.innerHTML = ''; }
+  const histBox = document.getElementById('panel-login-history');
+  if (histBox) { histBox.classList.add('hidden'); histBox.innerHTML = ''; }
   updatePanel(pc);
   document.getElementById('panel').classList.remove('hidden');
 }
@@ -766,6 +768,15 @@ function renderPanelActions(pc) {
     container.appendChild(btn);
   }
 
+  // Cronologia accessi — disponibile sempre (dati storici dal DB locale)
+  {
+    const btn = document.createElement('button');
+    btn.className   = 'btn-action';
+    btn.textContent = '🔐 Cronologia accessi';
+    btn.addEventListener('click', () => showLoginHistory(pc.hostname));
+    container.appendChild(btn);
+  }
+
   if (!pc.ip) {
     const note = document.createElement('p');
     note.className   = 'panel-note';
@@ -844,6 +855,45 @@ async function killProcess(hostname, pid, rowEl) {
   } catch {
     rowEl.style.opacity = '';
     alert('Errore di rete');
+  }
+}
+
+// ── Cronologia accessi (login/logout) ─────────────────────────────────────────
+async function showLoginHistory(hostname) {
+  const box = document.getElementById('panel-login-history');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="panel-loading">Caricamento cronologia…</div>';
+  try {
+    const res  = await apiFetch(`/api/login-history/${hostname}`);
+    const data = await res.json();
+    if (data.error) {
+      box.innerHTML = `<div class="panel-error">${escHtml(data.error)}</div>`;
+      return;
+    }
+    const events = data.events || [];
+    if (!events.length) {
+      box.innerHTML = '<div class="panel-loading">Nessun accesso registrato.</div>';
+      return;
+    }
+    const rows = events.map(e => {
+      const isLogon = e.event_type === 'logon';
+      const icon    = isLogon ? '🟢' : '🔴';
+      const label   = isLogon ? 'Login' : 'Logout';
+      const dt      = e.timestamp ? new Date(e.timestamp) : null;
+      const dtStr   = dt ? dt.toLocaleString('it-IT') : '—';
+      return `<tr>
+        <td class="login-dt">${dtStr}</td>
+        <td class="login-user" title="${escHtml(e.username)}">${escHtml(e.username)}</td>
+        <td class="login-event">${icon} ${label}</td>
+      </tr>`;
+    }).join('');
+    box.innerHTML =
+      `<table class="proc-table login-table">
+        <thead><tr><th>Data/Ora</th><th>Utente</th><th>Evento</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch {
+    box.innerHTML = '<div class="panel-error">Errore di rete</div>';
   }
 }
 
@@ -1204,6 +1254,7 @@ function populateSettingsForm() {
   const s = settingsConfig;
   document.getElementById('cfg-sede-name').value     = s?.sede?.name          ?? '';
   document.getElementById('cfg-poll-interval').value = s?.sede?.poll_interval ?? 10;
+  document.getElementById('cfg-login-history-interval').value = s?.sede?.login_history_interval ?? 30;
   document.getElementById('cfg-wol-broadcast').value = s?.network?.wol_broadcast ?? '';
   document.getElementById('cfg-gateway-ip').value    = s?.network?.gateway_ip    ?? '';
   document.getElementById('cfg-dc-ip').value         = s?.network?.dc_ip         ?? '';
@@ -1217,6 +1268,7 @@ function collectSettingsForm() {
     sede: {
       name:          document.getElementById('cfg-sede-name').value.trim(),
       poll_interval: parseInt(document.getElementById('cfg-poll-interval').value, 10) || 10,
+      login_history_interval: parseInt(document.getElementById('cfg-login-history-interval').value, 10) || 30,
     },
     network: {
       wol_broadcast: document.getElementById('cfg-wol-broadcast').value.trim(),

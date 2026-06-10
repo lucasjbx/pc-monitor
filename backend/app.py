@@ -8,6 +8,7 @@ import os
 import re
 import json as json_lib
 import socket
+import sqlite3
 import subprocess
 import platform
 import threading
@@ -30,6 +31,7 @@ POSITIONS_FILE = os.path.join(BASE_DIR, "positions.json")
 STATIC_DIR     = os.path.join(BASE_DIR, "static")
 FLOORPLAN_PATH = os.path.join(BASE_DIR, "..", "piantina.png")
 VERSION_FILE   = os.path.join(BASE_DIR, "..", "version.txt")
+LOGIN_DB_FILE  = os.path.join(BASE_DIR, "login_history.db")
 GITHUB_REPO    = "lucasjbx/pc-monitor"
 SERVICE_NAME   = "PcMonitor"
 PRESERVE_ON_UPDATE = {"config.json", "positions.json"}
@@ -164,7 +166,7 @@ def lookup_fullname_ad(username: str) -> str:
 
 
 _DEFAULT_CONFIG = {
-    "sede":    {"name": "PC Monitor", "poll_interval": 10},
+    "sede":    {"name": "PC Monitor", "poll_interval": 10, "login_history_interval": 30},
     "network": {"wol_broadcast": "", "gateway_ip": "", "dc_ip": ""},
     "wmi":     {"user": "", "pass": ""},
     "auth":    {"token": ""},
@@ -329,6 +331,198 @@ def parse_wmi_dt(s: str):
         return dt.replace(tzinfo=timezone(timedelta(minutes=ofs))).isoformat()
     except Exception:
         return None
+
+
+# ── Cronologia accessi (login/logout) — SQLite locale ───────────────────────────
+_login_db_lock = threading.Lock()
+
+# Account di sistema/macchina da escludere dalla cronologia accessi
+_LOGIN_IGNORE_USERS = {
+    "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE", "ANONYMOUS LOGON",
+    "DWM-1", "DWM-2", "DWM-3", "UMFD-0", "UMFD-1", "UMFD-2", "UMFD-3",
+}
+
+
+def _login_db_init() -> None:
+    """Crea le tabelle del DB cronologia accessi se non esistono. Chiamata all'avvio."""
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS login_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hostname   TEXT NOT NULL,
+                    username   TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    timestamp  TEXT NOT NULL,
+                    logon_type INTEGER
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_login_events_hostname
+                ON login_events (hostname, timestamp DESC)
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS login_scan_state (
+                    hostname           TEXT PRIMARY KEY,
+                    last_record_number INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_get_last_record(hostname: str) -> int:
+    """Ritorna l'ultimo RecordNumber del Security log già processato per questo PC."""
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT last_record_number FROM login_scan_state WHERE hostname = ?",
+                (hostname,)
+            ).fetchone()
+            return row[0] if row else 0
+        finally:
+            conn.close()
+
+
+def _login_db_set_last_record(hostname: str, record_number: int) -> None:
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.execute("""
+                INSERT INTO login_scan_state (hostname, last_record_number)
+                VALUES (?, ?)
+                ON CONFLICT(hostname) DO UPDATE SET last_record_number = excluded.last_record_number
+            """, (hostname, record_number))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_insert_events(hostname: str, events: list) -> None:
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.executemany("""
+                INSERT INTO login_events (hostname, username, event_type, timestamp, logon_type)
+                VALUES (?, ?, ?, ?, ?)
+            """, [
+                (hostname, e["username"], e["event_type"], e["timestamp"], e["logon_type"])
+                for e in events
+            ])
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_get_history(hostname: str, limit: int = 100) -> list:
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT username, event_type, timestamp, logon_type
+                FROM login_events
+                WHERE hostname = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (hostname, limit)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def scan_login_events(pc: dict) -> None:
+    """
+    Legge i nuovi eventi di logon/logoff interattivo (LogonType=2) dal Security log
+    del PC remoto e li salva nel DB cronologia accessi. Va chiamata periodicamente
+    da _login_history_loop(), solo per PC online.
+    """
+    hostname = pc.get("hostname", "")
+    target   = get_wmi_target(pc)
+    if not hostname or not target:
+        return
+    cfg      = get_cfg()
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    if not wmi_user or not wmi_pass:
+        return
+
+    last_record = _login_db_get_last_record(hostname)
+
+    try:
+        import wmi as wmilib
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+
+            # Limita la finestra alle ultime 24h per evitare scansioni lunghe del log
+            since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y%m%d%H%M%S.000000+000")
+            query = (
+                "SELECT * FROM Win32_NTLogEvent WHERE Logfile='Security' "
+                f"AND TimeGenerated >= '{since}' "
+                "AND (EventCode=4624 OR EventCode=4634 OR EventCode=4647)"
+            )
+            events = c.query(query)
+
+            new_events = []
+            max_record = last_record
+            for ev in events:
+                try:
+                    rec = int(ev.RecordNumber)
+                except Exception:
+                    continue
+                max_record = max(max_record, rec)
+                if rec <= last_record:
+                    continue
+
+                ins  = ev.InsertionStrings or []
+                code = int(ev.EventCode)
+
+                if code == 4624:      # logon — TargetUserName=ins[5], LogonType=ins[8]
+                    username   = ins[5] if len(ins) > 5 else ""
+                    logon_type = int(ins[8]) if len(ins) > 8 and str(ins[8]).isdigit() else None
+                    if logon_type != 2:
+                        continue
+                    event_type = "logon"
+                elif code == 4634:    # logoff — TargetUserName=ins[1], LogonType=ins[3]
+                    username   = ins[1] if len(ins) > 1 else ""
+                    logon_type = int(ins[3]) if len(ins) > 3 and str(ins[3]).isdigit() else None
+                    if logon_type != 2:
+                        continue
+                    event_type = "logoff"
+                elif code == 4647:    # logoff esplicito utente — TargetUserName=ins[1]
+                    username   = ins[1] if len(ins) > 1 else ""
+                    logon_type = 2
+                    event_type = "logoff"
+                else:
+                    continue
+
+                if not username or username.endswith("$") or username.upper() in _LOGIN_IGNORE_USERS:
+                    continue
+
+                ts = parse_wmi_dt(ev.TimeGenerated)
+                if not ts:
+                    continue
+
+                new_events.append({
+                    "username":   username,
+                    "event_type": event_type,
+                    "timestamp":  ts,
+                    "logon_type": logon_type,
+                })
+
+            if new_events:
+                _login_db_insert_events(hostname, new_events)
+            if max_record > last_record:
+                _login_db_set_last_record(hostname, max_record)
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception:
+        pass
 
 
 # ── Cache dati statici per PC (hostname → dict, svuotata quando il PC va offline) ──
@@ -672,10 +866,33 @@ def _poll_loop():
         _poll_event.wait(timeout=interval)
 
 
+def _login_history_loop():
+    """Thread daemon: ogni N minuti (configurabile) legge il Security log dei PC online
+    e salva i nuovi eventi di logon/logoff interattivo nel DB cronologia accessi."""
+    while True:
+        try:
+            with _cache_lock:
+                online_pcs = [dict(p) for p in _pc_cache if p.get("online")]
+            for pc in online_pcs:
+                try:
+                    scan_login_events(pc)
+                except Exception:
+                    pass
+        except Exception:
+            pass  # Il loop non deve mai fermarsi
+
+        cfg     = get_cfg()
+        minutes = cfg.get("sede", {}).get("login_history_interval", 30)
+        time.sleep(max(int(minutes or 30), 1) * 60)
+
+
 # Avvia il polling una sola volta
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
+    _login_db_init()
     _bg_thread = threading.Thread(target=_poll_loop, daemon=True, name="poll-loop")
     _bg_thread.start()
+    _login_thread = threading.Thread(target=_login_history_loop, daemon=True, name="login-history-loop")
+    _login_thread.start()
 
 
 # ── Endpoint Auth ────────────────────────────────────────────────────────────
@@ -840,6 +1057,18 @@ def get_processes(hostname: str):
             pythoncom.CoUninitialize()
     except Exception as e:
         return jsonify({"error": _wmi_friendly_error(e)}), 500
+
+
+@app.route("/api/login-history/<hostname>")
+@require_auth
+def get_login_history(hostname: str):
+    """Restituisce la cronologia login/logout (interattivi) salvata per questo PC."""
+    cfg = get_cfg()
+    pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    limit = request.args.get("limit", 100, type=int)
+    return jsonify({"events": _login_db_get_history(hostname, limit)})
 
 
 @app.route("/api/kill-process/<hostname>/<int:pid>", methods=["POST"])

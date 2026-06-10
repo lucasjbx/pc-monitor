@@ -2,6 +2,7 @@
 backend/config.json
 backend/positions.json
 backend/.env
+backend/login_history.db
 configs/
 
 # Piantinazie (planimetrie reali degli uffici)
