@@ -871,8 +871,19 @@ async function showLoginHistory(hostname) {
       return;
     }
     const events = data.events || [];
+    const status = data.scan_status || {};
+    let statusHtml = '';
+    if (status.last_scan_at) {
+      const dt    = new Date(status.last_scan_at + 'Z');
+      const dtStr = dt.toLocaleString('it-IT');
+      if (status.last_error) {
+        statusHtml = `<div class="login-status login-status-error">⚠️ Ultima scansione (${dtStr}) fallita: ${escHtml(status.last_error)}</div>`;
+      } else {
+        statusHtml = `<div class="login-status">Ultima scansione: ${dtStr}</div>`;
+      }
+    }
     if (!events.length) {
-      box.innerHTML = '<div class="panel-loading">Nessun accesso registrato.</div>';
+      box.innerHTML = statusHtml + '<div class="panel-loading">Nessun accesso registrato.</div>';
       return;
     }
     const rows = events.map(e => {
@@ -887,7 +898,7 @@ async function showLoginHistory(hostname) {
         <td class="login-event">${icon} ${label}</td>
       </tr>`;
     }).join('');
-    box.innerHTML =
+    box.innerHTML = statusHtml +
       `<table class="proc-table login-table">
         <thead><tr><th>Data/Ora</th><th>Utente</th><th>Evento</th></tr></thead>
         <tbody>${rows}</tbody>

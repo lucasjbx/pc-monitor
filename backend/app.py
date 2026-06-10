@@ -365,9 +365,17 @@ def _login_db_init() -> None:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_scan_state (
                     hostname           TEXT PRIMARY KEY,
-                    last_record_number INTEGER NOT NULL DEFAULT 0
+                    last_record_number INTEGER NOT NULL DEFAULT 0,
+                    last_scan_at       TEXT,
+                    last_error         TEXT
                 )
             """)
+            # Migrazione: aggiunge le colonne se il DB esiste già da una versione precedente
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(login_scan_state)")}
+            if "last_scan_at" not in cols:
+                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_scan_at TEXT")
+            if "last_error" not in cols:
+                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_error TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -397,6 +405,41 @@ def _login_db_set_last_record(hostname: str, record_number: int) -> None:
                 ON CONFLICT(hostname) DO UPDATE SET last_record_number = excluded.last_record_number
             """, (hostname, record_number))
             conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_set_scan_status(hostname: str, error: str | None) -> None:
+    """Registra l'esito (ok/errore) e l'orario dell'ultima scansione per questo PC,
+    senza modificare last_record_number."""
+    now = datetime.utcnow().isoformat()
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.execute("""
+                INSERT INTO login_scan_state (hostname, last_record_number, last_scan_at, last_error)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(hostname) DO UPDATE SET
+                    last_scan_at = excluded.last_scan_at,
+                    last_error   = excluded.last_error
+            """, (hostname, now, error))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_get_scan_status(hostname: str) -> dict:
+    """Ritorna {'last_scan_at': str|None, 'last_error': str|None} per questo PC."""
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT last_scan_at, last_error FROM login_scan_state WHERE hostname = ?",
+                (hostname,)
+            ).fetchone()
+            if not row:
+                return {"last_scan_at": None, "last_error": None}
+            return {"last_scan_at": row[0], "last_error": row[1]}
         finally:
             conn.close()
 
@@ -525,6 +568,7 @@ def scan_login_events(pc: dict) -> dict:
             if max_record > last_record:
                 _login_db_set_last_record(hostname, max_record)
 
+            _login_db_set_scan_status(hostname, None)
             return {
                 "ok": True, "error": None,
                 "scanned": scanned, "matched": len(new_events),
@@ -533,7 +577,9 @@ def scan_login_events(pc: dict) -> dict:
         finally:
             pythoncom.CoUninitialize()
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        error = f"{type(exc).__name__}: {exc}"
+        _login_db_set_scan_status(hostname, error)
+        return {"ok": False, "error": error}
 
 
 # ── Cache dati statici per PC (hostname → dict, svuotata quando il PC va offline) ──
@@ -1079,7 +1125,10 @@ def get_login_history(hostname: str):
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
     limit = request.args.get("limit", 100, type=int)
-    return jsonify({"events": _login_db_get_history(hostname, limit)})
+    return jsonify({
+        "events": _login_db_get_history(hostname, limit),
+        "scan_status": _login_db_get_scan_status(hostname),
+    })
 
 
 @app.route("/api/login-history/<hostname>/scan", methods=["POST"])
