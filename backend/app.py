@@ -434,21 +434,24 @@ def _login_db_get_history(hostname: str, limit: int = 100) -> list:
             conn.close()
 
 
-def scan_login_events(pc: dict) -> None:
+def scan_login_events(pc: dict) -> dict:
     """
-    Legge i nuovi eventi di logon/logoff interattivo (LogonType=2) dal Security log
+    Legge i nuovi eventi di logon/logoff (LogonType 2 o 7) dal Security log
     del PC remoto e li salva nel DB cronologia accessi. Va chiamata periodicamente
     da _login_history_loop(), solo per PC online.
+
+    Ritorna un dict con esito/diagnostica: {"ok": bool, "error": str|None,
+    "scanned": int, "matched": int, "last_record": int}
     """
     hostname = pc.get("hostname", "")
     target   = get_wmi_target(pc)
     if not hostname or not target:
-        return
+        return {"ok": False, "error": "hostname o target WMI mancante"}
     cfg      = get_cfg()
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
     if not wmi_user or not wmi_pass:
-        return
+        return {"ok": False, "error": "credenziali WMI non configurate"}
 
     last_record = _login_db_get_last_record(hostname)
 
@@ -466,10 +469,11 @@ def scan_login_events(pc: dict) -> None:
                 f"AND TimeGenerated >= '{since}' "
                 "AND (EventCode=4624 OR EventCode=4634 OR EventCode=4647)"
             )
-            events = c.query(query)
+            events = list(c.query(query))
 
             new_events = []
             max_record = last_record
+            scanned    = len(events)
             for ev in events:
                 try:
                     rec = int(ev.RecordNumber)
@@ -520,10 +524,16 @@ def scan_login_events(pc: dict) -> None:
                 _login_db_insert_events(hostname, new_events)
             if max_record > last_record:
                 _login_db_set_last_record(hostname, max_record)
+
+            return {
+                "ok": True, "error": None,
+                "scanned": scanned, "matched": len(new_events),
+                "last_record": max_record,
+            }
         finally:
             pythoncom.CoUninitialize()
-    except Exception:
-        pass
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 # ── Cache dati statici per PC (hostname → dict, svuotata quando il PC va offline) ──
@@ -1070,6 +1080,18 @@ def get_login_history(hostname: str):
         return jsonify({"error": "PC non trovato"}), 404
     limit = request.args.get("limit", 100, type=int)
     return jsonify({"events": _login_db_get_history(hostname, limit)})
+
+
+@app.route("/api/login-history/<hostname>/scan", methods=["POST"])
+@require_auth
+def force_login_history_scan(hostname: str):
+    """Forza una scansione immediata del Security log per questo PC (debug/test)."""
+    cfg = get_cfg()
+    pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+    result = scan_login_events(pc)
+    return jsonify(result)
 
 
 @app.route("/api/kill-process/<hostname>/<int:pid>", methods=["POST"])
