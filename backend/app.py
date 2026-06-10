@@ -482,16 +482,17 @@ def scan_login_events(pc: dict) -> None:
                 ins  = ev.InsertionStrings or []
                 code = int(ev.EventCode)
 
+                # LogonType interessanti: 2=interattivo (login completo), 7=sblocco schermo
                 if code == 4624:      # logon — TargetUserName=ins[5], LogonType=ins[8]
                     username   = ins[5] if len(ins) > 5 else ""
                     logon_type = int(ins[8]) if len(ins) > 8 and str(ins[8]).isdigit() else None
-                    if logon_type != 2:
+                    if logon_type not in (2, 7):
                         continue
                     event_type = "logon"
-                elif code == 4634:    # logoff — TargetUserName=ins[1], LogonType=ins[3]
+                elif code == 4634:    # logoff — TargetUserName=ins[1], LogonType=ins[4]
                     username   = ins[1] if len(ins) > 1 else ""
-                    logon_type = int(ins[3]) if len(ins) > 3 and str(ins[3]).isdigit() else None
-                    if logon_type != 2:
+                    logon_type = int(ins[4]) if len(ins) > 4 and str(ins[4]).isdigit() else None
+                    if logon_type not in (2, 7):
                         continue
                     event_type = "logoff"
                 elif code == 4647:    # logoff esplicito utente — TargetUserName=ins[1]
