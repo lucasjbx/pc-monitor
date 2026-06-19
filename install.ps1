@@ -131,17 +131,19 @@ New-Item -ItemType Directory -Force "$InstallDir\logs" | Out-Null
 # (password WMI e auth token non vengono mai scritti in config.json)
 $regPath = "HKLM:\SOFTWARE\PcMonitor\Secrets"
 if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-$acl = Get-Acl $regPath
-$acl.SetAccessRuleProtection($true, $false)   # disabilita ereditarietà da parent
-$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-    "NT AUTHORITY\SYSTEM",
-    "FullControl",
-    "ContainerInherit,ObjectInherit",
-    "None",
-    "Allow"
-)
-$acl.SetAccessRule($rule)
-Set-Acl -Path $regPath -AclObject $acl
+$acl = Get-Acl $regPath -ErrorAction SilentlyContinue
+if ($acl) {
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+        "NT AUTHORITY\SYSTEM",
+        "FullControl",
+        "ContainerInherit,ObjectInherit",
+        "None",
+        "Allow"
+    )
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $regPath -AclObject $acl -ErrorAction SilentlyContinue
+}
 
 # Applica config sede se specificata
 if ($ConfigFile -and (Test-Path $ConfigFile)) {
