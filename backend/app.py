@@ -1102,10 +1102,10 @@ def shadow_rdp(hostname: str):
             if session_id:
                 break
         if not session_id:
-            raw = qw.stdout.strip() or qw.stderr.strip() or "(nessun output)"
-            return jsonify({"error": f"Nessuna sessione attiva trovata su {hostname}. Output qwinsta: {raw}"}), 400
-    except Exception as exc:
-        return jsonify({"error": f"qwinsta fallito: {exc}"}), 500
+            # Fallback: su workstation Windows la sessione console è quasi sempre ID 1
+            session_id = "1"
+    except Exception:
+        session_id = "1"
     finally:
         subprocess.run(["net", "use", ipc, "/delete"],
                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
