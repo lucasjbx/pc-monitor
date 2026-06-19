@@ -750,6 +750,15 @@ function renderPanelActions(pc) {
     container.appendChild(btn);
   }
 
+  // Shadow — connessione alla sessione attiva (solo se online e ha IP)
+  if (pc.online && pc.ip) {
+    const btn = document.createElement('button');
+    btn.className   = 'btn-action';
+    btn.textContent = '👁 Shadow';
+    btn.addEventListener('click', () => showShadowChoice(pc.hostname));
+    container.appendChild(btn);
+  }
+
   // Processi CPU — on-demand, solo se online
   if (pc.online) {
     const btn = document.createElement('button');
@@ -903,6 +912,38 @@ async function showLoginHistory(hostname) {
         <thead><tr><th>Data/Ora</th><th>Utente</th><th>Evento</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+  } catch {
+    box.innerHTML = '<div class="panel-error">Errore di rete</div>';
+  }
+}
+
+// ── Shadow RDP ───────────────────────────────────────────────────────────────
+function showShadowChoice(hostname) {
+  const box = document.getElementById('panel-login-history');
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="shadow-choice">
+      <p class="shadow-label">Modalità shadow per <strong>${escHtml(hostname)}</strong>:</p>
+      <button class="btn-action" onclick="doShadow('${escHtml(hostname)}', true)">✅ Con consenso utente</button>
+      <button class="btn-action shadow-nocons" onclick="doShadow('${escHtml(hostname)}', false)">⚠️ Senza consenso</button>
+    </div>`;
+}
+
+async function doShadow(hostname, consent) {
+  const box = document.getElementById('panel-login-history');
+  box.innerHTML = '<div class="panel-loading">Avvio shadow in corso…</div>';
+  try {
+    const res  = await apiFetch(`/api/shadow/${hostname}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ consent }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      box.innerHTML = `<div class="panel-error">${escHtml(data.error || 'Errore')}</div>`;
+      return;
+    }
+    box.innerHTML = '<div class="panel-loading">✅ Shadow avviato — controlla il desktop del server.</div>';
   } catch {
     box.innerHTML = '<div class="panel-error">Errore di rete</div>';
   }
