@@ -1071,45 +1071,8 @@ def shadow_rdp(hostname: str):
     consent = request.get_json(silent=True, force=True) or {}
     consent = bool(consent.get("consent", True))
 
-    # Trova la sessione attiva sul PC remoto
-    # Il servizio gira come SYSTEM (senza credenziali di rete): usa net use per
-    # autenticarsi prima con le credenziali WMI, poi esegue qwinsta /server
-    wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = get_secret(SECRET_WMI_PASS)
-    # Usa hostname per qwinsta (Kerberos); l'IP forza NTLM che può essere bloccato
-    ipc = f"\\\\{hostname}\\IPC$"
-    try:
-        subprocess.run(
-            ["net", "use", ipc, f"/user:{wmi_user}", wmi_pass],
-            capture_output=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
-        qw = subprocess.run(
-            ["qwinsta", f"/server:{hostname}"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
-        # Parole chiave per "sessione attiva" nelle varie lingue di Windows
-        _ACTIVE_STATES = {"active", "attivo", "actif", "aktiv"}
-        session_id = None
-        for line in qw.stdout.splitlines():
-            parts = line.split()
-            for i, part in enumerate(parts):
-                if part.lower() in _ACTIVE_STATES and i > 0:
-                    candidate = parts[i - 1]
-                    if candidate.isdigit():
-                        session_id = candidate
-                        break
-            if session_id:
-                break
-        if not session_id:
-            # Fallback: su workstation Windows la sessione console è quasi sempre ID 1
-            session_id = "1"
-    except Exception:
-        session_id = "1"
-    finally:
-        subprocess.run(["net", "use", f"\\\\{hostname}\\IPC$", "/delete"],
-                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    # Su workstation Windows la sessione console interattiva è sempre ID 1
+    session_id = "1"
 
     # Lancia mstsc nella sessione interattiva locale via Task Scheduler
     # Nota: la policy Shadow=2 (senza consenso) deve essere configurata manualmente
