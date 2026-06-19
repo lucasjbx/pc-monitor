@@ -1076,7 +1076,8 @@ def shadow_rdp(hostname: str):
     # autenticarsi prima con le credenziali WMI, poi esegue qwinsta /server
     wmi_user = cfg.get("wmi", {}).get("user", "")
     wmi_pass = get_secret(SECRET_WMI_PASS)
-    ipc = f"\\\\{target}\\IPC$"
+    # Usa hostname per qwinsta (Kerberos); l'IP forza NTLM che può essere bloccato
+    ipc = f"\\\\{hostname}\\IPC$"
     try:
         subprocess.run(
             ["net", "use", ipc, f"/user:{wmi_user}", wmi_pass],
@@ -1084,7 +1085,7 @@ def shadow_rdp(hostname: str):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         qw = subprocess.run(
-            ["qwinsta", f"/server:{target}"],
+            ["qwinsta", f"/server:{hostname}"],
             capture_output=True, text=True, timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
@@ -1107,7 +1108,7 @@ def shadow_rdp(hostname: str):
     except Exception:
         session_id = "1"
     finally:
-        subprocess.run(["net", "use", ipc, "/delete"],
+        subprocess.run(["net", "use", f"\\\\{hostname}\\IPC$", "/delete"],
                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
     # Lancia mstsc nella sessione interattiva locale via Task Scheduler
