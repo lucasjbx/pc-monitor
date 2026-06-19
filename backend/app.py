@@ -1072,7 +1072,17 @@ def shadow_rdp(hostname: str):
     consent = bool(consent.get("consent", True))
 
     # Trova la sessione attiva sul PC remoto
+    # Il servizio gira come SYSTEM (senza credenziali di rete): usa net use per
+    # autenticarsi prima con le credenziali WMI, poi esegue qwinsta /server
+    wmi_user = cfg.get("wmi", {}).get("user", "")
+    wmi_pass = get_secret(SECRET_WMI_PASS)
+    ipc = f"\\\\{target}\\IPC$"
     try:
+        subprocess.run(
+            ["net", "use", ipc, f"/user:{wmi_user}", wmi_pass],
+            capture_output=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
         qw = subprocess.run(
             ["qwinsta", f"/server:{target}"],
             capture_output=True, text=True, timeout=10,
@@ -1085,7 +1095,6 @@ def shadow_rdp(hostname: str):
             parts = line.split()
             for i, part in enumerate(parts):
                 if part.lower() in _ACTIVE_STATES and i > 0:
-                    # Il campo prima dello stato è l'ID sessione (numerico)
                     candidate = parts[i - 1]
                     if candidate.isdigit():
                         session_id = candidate
@@ -1097,6 +1106,9 @@ def shadow_rdp(hostname: str):
             return jsonify({"error": f"Nessuna sessione attiva trovata su {hostname}. Output qwinsta: {raw}"}), 400
     except Exception as exc:
         return jsonify({"error": f"qwinsta fallito: {exc}"}), 500
+    finally:
+        subprocess.run(["net", "use", ipc, "/delete"],
+                       capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
     # Lancia mstsc nella sessione interattiva locale via Task Scheduler
     # Nota: la policy Shadow=2 (senza consenso) deve essere configurata manualmente
