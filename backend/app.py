@@ -365,9 +365,17 @@ def _login_db_init() -> None:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_scan_state (
                     hostname           TEXT PRIMARY KEY,
-                    last_record_number INTEGER NOT NULL DEFAULT 0
+                    last_record_number INTEGER NOT NULL DEFAULT 0,
+                    last_scan_at       TEXT,
+                    last_error         TEXT
                 )
             """)
+            # Migrazione: aggiunge le colonne se il DB esiste già da una versione precedente
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(login_scan_state)")}
+            if "last_scan_at" not in cols:
+                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_scan_at TEXT")
+            if "last_error" not in cols:
+                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_error TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -397,6 +405,41 @@ def _login_db_set_last_record(hostname: str, record_number: int) -> None:
                 ON CONFLICT(hostname) DO UPDATE SET last_record_number = excluded.last_record_number
             """, (hostname, record_number))
             conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_set_scan_status(hostname: str, error: str | None) -> None:
+    """Registra l'esito (ok/errore) e l'orario dell'ultima scansione per questo PC,
+    senza modificare last_record_number."""
+    now = datetime.utcnow().isoformat()
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            conn.execute("""
+                INSERT INTO login_scan_state (hostname, last_record_number, last_scan_at, last_error)
+                VALUES (?, 0, ?, ?)
+                ON CONFLICT(hostname) DO UPDATE SET
+                    last_scan_at = excluded.last_scan_at,
+                    last_error   = excluded.last_error
+            """, (hostname, now, error))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _login_db_get_scan_status(hostname: str) -> dict:
+    """Ritorna {'last_scan_at': str|None, 'last_error': str|None} per questo PC."""
+    with _login_db_lock:
+        conn = sqlite3.connect(LOGIN_DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT last_scan_at, last_error FROM login_scan_state WHERE hostname = ?",
+                (hostname,)
+            ).fetchone()
+            if not row:
+                return {"last_scan_at": None, "last_error": None}
+            return {"last_scan_at": row[0], "last_error": row[1]}
         finally:
             conn.close()
 
@@ -525,6 +568,7 @@ def scan_login_events(pc: dict) -> dict:
             if max_record > last_record:
                 _login_db_set_last_record(hostname, max_record)
 
+            _login_db_set_scan_status(hostname, None)
             return {
                 "ok": True, "error": None,
                 "scanned": scanned, "matched": len(new_events),
@@ -533,7 +577,9 @@ def scan_login_events(pc: dict) -> dict:
         finally:
             pythoncom.CoUninitialize()
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        error = f"{type(exc).__name__}: {exc}"
+        _login_db_set_scan_status(hostname, error)
+        return {"ok": False, "error": error}
 
 
 # ── Cache dati statici per PC (hostname → dict, svuotata quando il PC va offline) ──
@@ -1006,6 +1052,101 @@ def rdp_file(hostname: str):
         headers={"Content-Disposition": f'attachment; filename="{hostname}.rdp"'}
     )
 
+@app.route("/api/shadow/<hostname>", methods=["POST"])
+@require_auth
+def shadow_rdp(hostname: str):
+    """Avvia mstsc /shadow sulla sessione attiva del PC remoto, lanciandolo
+    nella sessione interattiva locale tramite Task Scheduler."""
+    cfg  = get_cfg()
+    pc   = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
+    if not pc:
+        return jsonify({"error": "PC non trovato"}), 404
+
+    with _cache_lock:
+        cached = next((p for p in _pc_cache if p.get("hostname") == hostname), None)
+    target = (cached or {}).get("ip", "") or pc.get("ip", "") or get_wmi_target(pc)
+    if not target:
+        return jsonify({"error": "IP non disponibile"}), 400
+
+    consent = request.get_json(silent=True, force=True) or {}
+    consent = bool(consent.get("consent", True))
+
+    # Trova la sessione attiva sul PC remoto
+    try:
+        qw = subprocess.run(
+            ["qwinsta", f"/server:{target}"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        session_id = None
+        for line in qw.stdout.splitlines():
+            if "Active" in line:
+                parts = line.split()
+                try:
+                    idx = parts.index("Active")
+                    session_id = parts[idx - 1]
+                except (ValueError, IndexError):
+                    continue
+                break
+        if not session_id:
+            return jsonify({"error": f"Nessuna sessione attiva trovata su {hostname}"}), 400
+    except Exception as exc:
+        return jsonify({"error": f"qwinsta fallito: {exc}"}), 500
+
+    # Senza consenso: imposta policy Shadow=2 sul PC remoto via WMI
+    if not consent:
+        try:
+            import wmi as wmilib
+            import pythoncom
+            wmi_user = cfg.get("wmi", {}).get("user", "")
+            wmi_pass = get_secret(SECRET_WMI_PASS)
+            pythoncom.CoInitialize()
+            try:
+                c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+                svcs = c.Win32_Service(Name="RemoteRegistry")
+                if svcs and svcs[0].State != "Running":
+                    svcs[0].StartService()
+                    time.sleep(2)
+                HKLM = 0x80000002
+                c.StdRegProv.SetDWORDValue(
+                    HKLM,
+                    r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
+                    "Shadow", 2
+                )
+            finally:
+                pythoncom.CoUninitialize()
+        except Exception as exc:
+            app.logger.warning("Shadow: impossibile impostare policy su %s: %s", hostname, exc)
+            # Non blocchiamo: l'utente potrebbe aver già configurato la policy manualmente
+
+    # Lancia mstsc nella sessione interattiva locale via Task Scheduler
+    try:
+        import win32com.client
+        cmd_args = f"/shadow:{session_id} /v:{target} /control"
+        if not consent:
+            cmd_args += " /noConsentPrompt"
+
+        sched    = win32com.client.Dispatch("Schedule.Service")
+        sched.Connect()
+        folder   = sched.GetFolder("\\")
+        task_def = sched.NewTask(0)
+        task_def.Settings.Hidden = False
+        task_def.Principal.LogonType = 3   # TASK_LOGON_INTERACTIVE_TOKEN
+
+        act           = task_def.Actions.Create(0)   # TASK_ACTION_EXEC
+        act.Path      = "mstsc.exe"
+        act.Arguments = cmd_args
+
+        folder.RegisterTaskDefinition(
+            "PcMonitorShadow", task_def, 6, None, None, 0
+        )
+        folder.GetTask("\\PcMonitorShadow").Run(None)
+    except Exception as exc:
+        return jsonify({"error": f"Impossibile avviare mstsc: {exc}"}), 500
+
+    return jsonify({"ok": True})
+
+
 @app.route("/api/processes/<hostname>")
 @require_auth
 def get_processes(hostname: str):
@@ -1079,7 +1220,10 @@ def get_login_history(hostname: str):
     if not pc:
         return jsonify({"error": "PC non trovato"}), 404
     limit = request.args.get("limit", 100, type=int)
-    return jsonify({"events": _login_db_get_history(hostname, limit)})
+    return jsonify({
+        "events": _login_db_get_history(hostname, limit),
+        "scan_status": _login_db_get_scan_status(hostname),
+    })
 
 
 @app.route("/api/login-history/<hostname>/scan", methods=["POST"])
