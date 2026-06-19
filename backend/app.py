@@ -1098,33 +1098,11 @@ def shadow_rdp(hostname: str):
     except Exception as exc:
         return jsonify({"error": f"qwinsta fallito: {exc}"}), 500
 
-    # Senza consenso: imposta policy Shadow=2 sul PC remoto via WMI
-    if not consent:
-        try:
-            import wmi as wmilib
-            import pythoncom
-            wmi_user = cfg.get("wmi", {}).get("user", "")
-            wmi_pass = get_secret(SECRET_WMI_PASS)
-            pythoncom.CoInitialize()
-            try:
-                c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-                svcs = c.Win32_Service(Name="RemoteRegistry")
-                if svcs and svcs[0].State != "Running":
-                    svcs[0].StartService()
-                    time.sleep(2)
-                HKLM = 0x80000002
-                c.StdRegProv.SetDWORDValue(
-                    HKLM,
-                    r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
-                    "Shadow", 2
-                )
-            finally:
-                pythoncom.CoUninitialize()
-        except Exception as exc:
-            app.logger.warning("Shadow: impossibile impostare policy su %s: %s", hostname, exc)
-            # Non blocchiamo: l'utente potrebbe aver già configurato la policy manualmente
-
     # Lancia mstsc nella sessione interattiva locale via Task Scheduler
+    # Nota: la policy Shadow=2 (senza consenso) deve essere configurata manualmente
+    # via Group Policy sul PC remoto: Computer Config → Admin Templates →
+    # Windows Components → Remote Desktop Services → Remote Session Environment →
+    # "Set rules for remote control" → "Full Control without user's permission"
     try:
         import win32com.client
         cmd_args = f"/shadow:{session_id} /v:{target} /control"
