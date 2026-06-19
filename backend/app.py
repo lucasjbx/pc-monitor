@@ -1078,18 +1078,23 @@ def shadow_rdp(hostname: str):
             capture_output=True, text=True, timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
+        # Parole chiave per "sessione attiva" nelle varie lingue di Windows
+        _ACTIVE_STATES = {"active", "attivo", "actif", "aktiv"}
         session_id = None
         for line in qw.stdout.splitlines():
-            if "Active" in line:
-                parts = line.split()
-                try:
-                    idx = parts.index("Active")
-                    session_id = parts[idx - 1]
-                except (ValueError, IndexError):
-                    continue
+            parts = line.split()
+            for i, part in enumerate(parts):
+                if part.lower() in _ACTIVE_STATES and i > 0:
+                    # Il campo prima dello stato è l'ID sessione (numerico)
+                    candidate = parts[i - 1]
+                    if candidate.isdigit():
+                        session_id = candidate
+                        break
+            if session_id:
                 break
         if not session_id:
-            return jsonify({"error": f"Nessuna sessione attiva trovata su {hostname}"}), 400
+            raw = qw.stdout.strip() or qw.stderr.strip() or "(nessun output)"
+            return jsonify({"error": f"Nessuna sessione attiva trovata su {hostname}. Output qwinsta: {raw}"}), 400
     except Exception as exc:
         return jsonify({"error": f"qwinsta fallito: {exc}"}), 500
 
