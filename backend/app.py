@@ -8,7 +8,6 @@ import os
 import re
 import json as json_lib
 import socket
-import sqlite3
 import subprocess
 import platform
 import threading
@@ -31,7 +30,6 @@ POSITIONS_FILE = os.path.join(BASE_DIR, "positions.json")
 STATIC_DIR     = os.path.join(BASE_DIR, "static")
 FLOORPLAN_PATH = os.path.join(BASE_DIR, "..", "piantina.png")
 VERSION_FILE   = os.path.join(BASE_DIR, "..", "version.txt")
-LOGIN_DB_FILE  = os.path.join(BASE_DIR, "login_history.db")
 GITHUB_REPO    = "lucasjbx/pc-monitor"
 SERVICE_NAME   = "PcMonitor"
 PRESERVE_ON_UPDATE = {"config.json", "positions.json"}
@@ -166,7 +164,7 @@ def lookup_fullname_ad(username: str) -> str:
 
 
 _DEFAULT_CONFIG = {
-    "sede":    {"name": "PC Monitor", "poll_interval": 10, "login_history_interval": 30},
+    "sede":    {"name": "PC Monitor", "poll_interval": 10},
     "network": {"wol_broadcast": "", "gateway_ip": "", "dc_ip": ""},
     "wmi":     {"user": "", "pass": ""},
     "auth":    {"token": ""},
@@ -331,255 +329,6 @@ def parse_wmi_dt(s: str):
         return dt.replace(tzinfo=timezone(timedelta(minutes=ofs))).isoformat()
     except Exception:
         return None
-
-
-# ── Cronologia accessi (login/logout) — SQLite locale ───────────────────────────
-_login_db_lock = threading.Lock()
-
-# Account di sistema/macchina da escludere dalla cronologia accessi
-_LOGIN_IGNORE_USERS = {
-    "SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE", "ANONYMOUS LOGON",
-    "DWM-1", "DWM-2", "DWM-3", "UMFD-0", "UMFD-1", "UMFD-2", "UMFD-3",
-}
-
-
-def _login_db_init() -> None:
-    """Crea le tabelle del DB cronologia accessi se non esistono. Chiamata all'avvio."""
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS login_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    hostname   TEXT NOT NULL,
-                    username   TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    timestamp  TEXT NOT NULL,
-                    logon_type INTEGER
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_login_events_hostname
-                ON login_events (hostname, timestamp DESC)
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS login_scan_state (
-                    hostname           TEXT PRIMARY KEY,
-                    last_record_number INTEGER NOT NULL DEFAULT 0,
-                    last_scan_at       TEXT,
-                    last_error         TEXT
-                )
-            """)
-            # Migrazione: aggiunge le colonne se il DB esiste già da una versione precedente
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(login_scan_state)")}
-            if "last_scan_at" not in cols:
-                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_scan_at TEXT")
-            if "last_error" not in cols:
-                conn.execute("ALTER TABLE login_scan_state ADD COLUMN last_error TEXT")
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _login_db_get_last_record(hostname: str) -> int:
-    """Ritorna l'ultimo RecordNumber del Security log già processato per questo PC."""
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            row = conn.execute(
-                "SELECT last_record_number FROM login_scan_state WHERE hostname = ?",
-                (hostname,)
-            ).fetchone()
-            return row[0] if row else 0
-        finally:
-            conn.close()
-
-
-def _login_db_set_last_record(hostname: str, record_number: int) -> None:
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            conn.execute("""
-                INSERT INTO login_scan_state (hostname, last_record_number)
-                VALUES (?, ?)
-                ON CONFLICT(hostname) DO UPDATE SET last_record_number = excluded.last_record_number
-            """, (hostname, record_number))
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _login_db_set_scan_status(hostname: str, error: str | None) -> None:
-    """Registra l'esito (ok/errore) e l'orario dell'ultima scansione per questo PC,
-    senza modificare last_record_number."""
-    now = datetime.utcnow().isoformat()
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            conn.execute("""
-                INSERT INTO login_scan_state (hostname, last_record_number, last_scan_at, last_error)
-                VALUES (?, 0, ?, ?)
-                ON CONFLICT(hostname) DO UPDATE SET
-                    last_scan_at = excluded.last_scan_at,
-                    last_error   = excluded.last_error
-            """, (hostname, now, error))
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _login_db_get_scan_status(hostname: str) -> dict:
-    """Ritorna {'last_scan_at': str|None, 'last_error': str|None} per questo PC."""
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            row = conn.execute(
-                "SELECT last_scan_at, last_error FROM login_scan_state WHERE hostname = ?",
-                (hostname,)
-            ).fetchone()
-            if not row:
-                return {"last_scan_at": None, "last_error": None}
-            return {"last_scan_at": row[0], "last_error": row[1]}
-        finally:
-            conn.close()
-
-
-def _login_db_insert_events(hostname: str, events: list) -> None:
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            conn.executemany("""
-                INSERT INTO login_events (hostname, username, event_type, timestamp, logon_type)
-                VALUES (?, ?, ?, ?, ?)
-            """, [
-                (hostname, e["username"], e["event_type"], e["timestamp"], e["logon_type"])
-                for e in events
-            ])
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _login_db_get_history(hostname: str, limit: int = 100) -> list:
-    with _login_db_lock:
-        conn = sqlite3.connect(LOGIN_DB_FILE)
-        try:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
-                SELECT username, event_type, timestamp, logon_type
-                FROM login_events
-                WHERE hostname = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT ?
-            """, (hostname, limit)).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-
-def scan_login_events(pc: dict) -> dict:
-    """
-    Legge i nuovi eventi di logon/logoff (LogonType 2 o 7) dal Security log
-    del PC remoto e li salva nel DB cronologia accessi. Va chiamata periodicamente
-    da _login_history_loop(), solo per PC online.
-
-    Ritorna un dict con esito/diagnostica: {"ok": bool, "error": str|None,
-    "scanned": int, "matched": int, "last_record": int}
-    """
-    hostname = pc.get("hostname", "")
-    target   = get_wmi_target(pc)
-    if not hostname or not target:
-        return {"ok": False, "error": "hostname o target WMI mancante"}
-    cfg      = get_cfg()
-    wmi_user = cfg.get("wmi", {}).get("user", "")
-    wmi_pass = get_secret(SECRET_WMI_PASS)
-    if not wmi_user or not wmi_pass:
-        return {"ok": False, "error": "credenziali WMI non configurate"}
-
-    last_record = _login_db_get_last_record(hostname)
-
-    try:
-        import wmi as wmilib
-        import pythoncom
-        pythoncom.CoInitialize()
-        try:
-            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-
-            # Limita la finestra alle ultime 24h per evitare scansioni lunghe del log
-            since = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y%m%d%H%M%S.000000+000")
-            query = (
-                "SELECT * FROM Win32_NTLogEvent WHERE Logfile='Security' "
-                f"AND TimeGenerated >= '{since}' "
-                "AND (EventCode=4624 OR EventCode=4634 OR EventCode=4647)"
-            )
-            events = list(c.query(query))
-
-            new_events = []
-            max_record = last_record
-            scanned    = len(events)
-            for ev in events:
-                try:
-                    rec = int(ev.RecordNumber)
-                except Exception:
-                    continue
-                max_record = max(max_record, rec)
-                if rec <= last_record:
-                    continue
-
-                ins  = ev.InsertionStrings or []
-                code = int(ev.EventCode)
-
-                # LogonType interessanti: 2=interattivo (login completo), 7=sblocco schermo
-                if code == 4624:      # logon — TargetUserName=ins[5], LogonType=ins[8]
-                    username   = ins[5] if len(ins) > 5 else ""
-                    logon_type = int(ins[8]) if len(ins) > 8 and str(ins[8]).isdigit() else None
-                    if logon_type not in (2, 7):
-                        continue
-                    event_type = "logon"
-                elif code == 4634:    # logoff — TargetUserName=ins[1], LogonType=ins[4]
-                    username   = ins[1] if len(ins) > 1 else ""
-                    logon_type = int(ins[4]) if len(ins) > 4 and str(ins[4]).isdigit() else None
-                    if logon_type not in (2, 7):
-                        continue
-                    event_type = "logoff"
-                elif code == 4647:    # logoff esplicito utente — TargetUserName=ins[1]
-                    username   = ins[1] if len(ins) > 1 else ""
-                    logon_type = 2
-                    event_type = "logoff"
-                else:
-                    continue
-
-                if not username or username.endswith("$") or username.upper() in _LOGIN_IGNORE_USERS:
-                    continue
-
-                ts = parse_wmi_dt(ev.TimeGenerated)
-                if not ts:
-                    continue
-
-                new_events.append({
-                    "username":   username,
-                    "event_type": event_type,
-                    "timestamp":  ts,
-                    "logon_type": logon_type,
-                })
-
-            if new_events:
-                _login_db_insert_events(hostname, new_events)
-            if max_record > last_record:
-                _login_db_set_last_record(hostname, max_record)
-
-            _login_db_set_scan_status(hostname, None)
-            return {
-                "ok": True, "error": None,
-                "scanned": scanned, "matched": len(new_events),
-                "last_record": max_record,
-            }
-        finally:
-            pythoncom.CoUninitialize()
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        _login_db_set_scan_status(hostname, error)
-        return {"ok": False, "error": error}
 
 
 # ── Cache dati statici per PC (hostname → dict, svuotata quando il PC va offline) ──
@@ -864,8 +613,8 @@ _pc_cache   = []
 _cache_lock = threading.Lock()
 
 # Risultati screenshot in attesa (hostname → {token, done, data})
-_screenshot_results      = {}
-_screenshot_lock         = threading.Lock()
+_screenshot_results = {}
+_screenshot_lock    = threading.Lock()
 _poll_event = threading.Event()   # segnala al loop di ripartire subito dopo cambio config
 
 
@@ -923,33 +672,10 @@ def _poll_loop():
         _poll_event.wait(timeout=interval)
 
 
-def _login_history_loop():
-    """Thread daemon: ogni N minuti (configurabile) legge il Security log dei PC online
-    e salva i nuovi eventi di logon/logoff interattivo nel DB cronologia accessi."""
-    while True:
-        try:
-            with _cache_lock:
-                online_pcs = [dict(p) for p in _pc_cache if p.get("online")]
-            for pc in online_pcs:
-                try:
-                    scan_login_events(pc)
-                except Exception:
-                    pass
-        except Exception:
-            pass  # Il loop non deve mai fermarsi
-
-        cfg     = get_cfg()
-        minutes = cfg.get("sede", {}).get("login_history_interval", 30)
-        time.sleep(max(int(minutes or 30), 1) * 60)
-
-
 # Avvia il polling una sola volta
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
-    _login_db_init()
     _bg_thread = threading.Thread(target=_poll_loop, daemon=True, name="poll-loop")
     _bg_thread.start()
-    _login_thread = threading.Thread(target=_login_history_loop, daemon=True, name="login-history-loop")
-    _login_thread.start()
 
 
 # ── Endpoint Auth ────────────────────────────────────────────────────────────
@@ -1052,60 +778,6 @@ def rdp_file(hostname: str):
         headers={"Content-Disposition": f'attachment; filename="{hostname}.rdp"'}
     )
 
-@app.route("/api/shadow/<hostname>", methods=["POST"])
-@require_auth
-def shadow_rdp(hostname: str):
-    """Avvia mstsc /shadow sulla sessione attiva del PC remoto, lanciandolo
-    nella sessione interattiva locale tramite Task Scheduler."""
-    cfg  = get_cfg()
-    pc   = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
-    if not pc:
-        return jsonify({"error": "PC non trovato"}), 404
-
-    with _cache_lock:
-        cached = next((p for p in _pc_cache if p.get("hostname") == hostname), None)
-    target = (cached or {}).get("ip", "") or pc.get("ip", "") or get_wmi_target(pc)
-    if not target:
-        return jsonify({"error": "IP non disponibile"}), 400
-
-    consent = request.get_json(silent=True, force=True) or {}
-    consent = bool(consent.get("consent", True))
-
-    # Su workstation Windows la sessione console interattiva è sempre ID 1
-    session_id = "1"
-
-    # Lancia mstsc nella sessione interattiva locale via Task Scheduler
-    # Nota: la policy Shadow=2 (senza consenso) deve essere configurata manualmente
-    # via Group Policy sul PC remoto: Computer Config → Admin Templates →
-    # Windows Components → Remote Desktop Services → Remote Session Environment →
-    # "Set rules for remote control" → "Full Control without user's permission"
-    try:
-        import win32com.client
-        cmd_args = f"/shadow:{session_id} /v:{target} /control"
-        if not consent:
-            cmd_args += " /noConsentPrompt"
-
-        sched    = win32com.client.Dispatch("Schedule.Service")
-        sched.Connect()
-        folder   = sched.GetFolder("\\")
-        task_def = sched.NewTask(0)
-        task_def.Settings.Hidden = False
-        task_def.Principal.LogonType = 3   # TASK_LOGON_INTERACTIVE_TOKEN
-
-        act           = task_def.Actions.Create(0)   # TASK_ACTION_EXEC
-        act.Path      = "mstsc.exe"
-        act.Arguments = cmd_args
-
-        folder.RegisterTaskDefinition(
-            "PcMonitorShadow", task_def, 6, None, None, 0
-        )
-        folder.GetTask("\\PcMonitorShadow").Run(None)
-    except Exception as exc:
-        return jsonify({"error": f"Impossibile avviare mstsc: {exc}"}), 500
-
-    return jsonify({"ok": True})
-
-
 @app.route("/api/processes/<hostname>")
 @require_auth
 def get_processes(hostname: str):
@@ -1124,77 +796,25 @@ def get_processes(hostname: str):
         import pythoncom
         pythoncom.CoInitialize()
         try:
-            c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            c     = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
+            procs = c.Win32_PerfFormattedData_PerfProc_Process()
             result = []
-
-            # Prova prima con Win32_PerfFormattedData (ha CPU%) — non disponibile su tutti i sistemi
-            use_fallback = False
-            try:
-                procs = c.Win32_PerfFormattedData_PerfProc_Process()
-                for p in procs:
-                    name = p.Name or ""
-                    if name in ("_Total", "Idle", ""):
-                        continue
-                    result.append({
-                        "name": name,
-                        "pid":  int(p.IDProcess or 0),
-                        "cpu":  int(p.PercentProcessorTime or 0),
-                        "mem":  round(int(p.WorkingSetPrivate or 0) / 1048576, 1),
-                    })
-            except (Exception, AttributeError) as perf_err:
-                app.logger.warning("Win32_PerfFormattedData non disponibile su %s (%s: %s) — fallback Win32_Process",
-                                   hostname, type(perf_err).__name__, perf_err)
-                use_fallback = True
-
-            if use_fallback:
-                # Fallback: Win32_Process — universale, ma senza CPU% in tempo reale
-                result = []
-                procs = c.Win32_Process()
-                for p in procs:
-                    name = p.Name or ""
-                    if name in ("", "System Idle Process"):
-                        continue
-                    result.append({
-                        "name": name,
-                        "pid":  int(p.ProcessId or 0),
-                        "cpu":  0,
-                        "mem":  round(int(p.WorkingSetSize or 0) / 1048576, 1),
-                    })
-
-            result.sort(key=lambda x: (x["cpu"], x["mem"]), reverse=True)
-            cpu_available = any(p["cpu"] > 0 for p in result)
-            return jsonify({"processes": result[:15], "cpu_available": cpu_available})
+            for p in procs:
+                name = p.Name or ""
+                if name in ("_Total", "Idle", ""):
+                    continue
+                result.append({
+                    "name": name,
+                    "pid":  int(p.IDProcess or 0),
+                    "cpu":  int(p.PercentProcessorTime or 0),
+                    "mem":  round(int(p.WorkingSetPrivate or 0) / 1048576, 1),
+                })
+            result.sort(key=lambda x: x["cpu"], reverse=True)
+            return jsonify({"processes": result[:15]})
         finally:
             pythoncom.CoUninitialize()
     except Exception as e:
         return jsonify({"error": _wmi_friendly_error(e)}), 500
-
-
-@app.route("/api/login-history/<hostname>")
-@require_auth
-def get_login_history(hostname: str):
-    """Restituisce la cronologia login/logout (interattivi) salvata per questo PC."""
-    cfg = get_cfg()
-    pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
-    if not pc:
-        return jsonify({"error": "PC non trovato"}), 404
-    limit = request.args.get("limit", 100, type=int)
-    return jsonify({
-        "events": _login_db_get_history(hostname, limit),
-        "scan_status": _login_db_get_scan_status(hostname),
-    })
-
-
-@app.route("/api/login-history/<hostname>/scan", methods=["POST"])
-@require_auth
-def force_login_history_scan(hostname: str):
-    """Forza una scansione immediata del Security log per questo PC (debug/test)."""
-    cfg = get_cfg()
-    pc  = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
-    if not pc:
-        return jsonify({"error": "PC non trovato"}), 404
-    result = scan_login_events(pc)
-    return jsonify(result)
 
 
 @app.route("/api/kill-process/<hostname>/<int:pid>", methods=["POST"])
@@ -1251,32 +871,13 @@ def screenshot_receive():
 @require_auth
 def get_screenshot(hostname: str):
     """
-    Cattura lo schermo del PC remoto via Schedule.Service COM.
-    Nessun WinRM, nessun Win32_Process.Create.
-
-    Vincolo principale: l'EDR (Bitdefender ATC) decodifica -EncodedCommand
-    via AMSI e blocca qualunque pattern che somigli a un dropper multi-stadio
-    — sia "scarica ed esegui in memoria" (DownloadString | iex) sia "scrivi
-    su disco un lanciatore .vbs che richiama un altro comando PowerShell
-    codificato" (la tecnica wscript.exe + WshShell.Run(...,0,False) che
-    garantirebbe finestra zero, ma è strutturalmente identica a un dropper
-    e viene bloccata indipendentemente da come gira il task).
-
-    L'unico schema che supera l'EDR è l'esecuzione diretta e autonoma dello
-    script — al prezzo di un breve lampeggio della console PowerShell
-    (-WindowStyle Hidden nasconde la finestra ma non evita il primo frame).
-
+    Cattura lo schermo del PC remoto usando solo WMI (nessun WinRM richiesto).
     Flusso:
-      1. WMI trova l'utente loggato (explorer.exe)
-      2. Python si connette al Task Scheduler remoto via Schedule.Service.Connect
-         usando le credenziali WMI
-      3. Crea un task InteractiveToken con lo script di cattura incorporato
-         (-EncodedCommand): nessun file su disco, nessuna richiesta HTTP
-         all'avvio
-      4. Lo script posta il JPEG a /api/screenshot-receive
+      1. WMI crea un Task Schedulato con InteractiveToken (sessione utente, no password)
+      2. Lo script cattura lo schermo e posta il JPEG via HTTP all'app server
+      3. L'endpoint /api/screenshot-receive riceve i dati e sveglia questo thread
     """
     import base64 as _b64
-    import secrets as _sec
 
     cfg      = get_cfg()
     pc       = next((p for p in cfg.get("pcs", []) if p["hostname"] == hostname), None)
@@ -1288,23 +889,24 @@ def get_screenshot(hostname: str):
     if not wmi_user or not wmi_pass:
         return jsonify({"error": "Credenziali WMI non configurate"}), 400
 
+    import base64 as _b64
+    import secrets as _sec
+
+    # IP del server app (quello che i PC remoti usano per aprire l'UI)
     gateway   = cfg.get("network", {}).get("gateway_ip", "")
     server_ip = get_local_ip(gateway) if gateway else ""
     if not server_ip or server_ip == "0.0.0.0":
-        return jsonify({"error": "IP server non determinabile (configura gateway_ip)"}), 500
+        return jsonify({"error": "IP server non determinabile (configura gateway_ip in Impostazioni → Rete)"}), 500
     server_url = f"http://{server_ip}:5000/api/screenshot-receive"
 
+    # Token one-time per questa richiesta
     token = _sec.token_hex(16)
     with _screenshot_lock:
         _screenshot_results[hostname] = {"token": token, "done": False, "data": None}
 
-    # ------------------------------------------------------------------
-    # 1. Script di cattura: gira nella sessione interattiva dell'utente,
-    #    cattura lo schermo e posta il JPEG via HTTP all'app server.
-    #    -EncodedCommand vuole UTF-16LE in Base64: viaggia incorporato
-    #    nell'azione del task, senza alcuna richiesta HTTP al momento
-    #    dell'esecuzione (niente "download cradle" che fa scattare l'EDR).
-    # ------------------------------------------------------------------
+    # Script che gira nella sessione interattiva dell'utente:
+    # cattura lo schermo e lo posta via HTTP all'app server.
+    # Usa JSON manuale per evitare overhead di ConvertTo-Json su payload grande.
     inner_lines = [
         f"$url   = '{server_url}'",
         f"$token = '{token}'",
@@ -1322,90 +924,81 @@ def get_screenshot(hostname: str):
         "    $req  = [System.Net.WebRequest]::Create($url)",
         "    $req.Method      = 'POST'",
         "    $req.ContentType = 'application/json'",
-        "    $req.Proxy       = New-Object System.Net.WebProxy",
         "    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)",
         "    $req.ContentLength = $bytes.Length",
         "    $stream = $req.GetRequestStream()",
         "    $stream.Write($bytes, 0, $bytes.Length)",
         "    $stream.Close()",
-        "    $req.GetResponse().Close()",
+        "    $req.GetResponse() | Out-Null",
         "} catch {}",
     ]
-    inner_script  = "\n".join(inner_lines)
-    inner_encoded = _b64.b64encode(inner_script.encode("utf-16-le")).decode("ascii")
+    inner_script = "\n".join(inner_lines)
+    inner_b64    = _b64.b64encode(inner_script.encode("utf-8")).decode("ascii")
 
-    # NB: la tecnica "wscript.exe + lanciatore .vbs con WshShell.Run(...,0,False)"
-    # garantirebbe zero finestre visibili (SW_HIDE reale a livello Win32), ma
-    # richiede scrivere su disco uno script che racchiude un altro comando
-    # PowerShell codificato — pattern strutturalmente identico a un dropper
-    # multi-stadio. Bitdefender ATC lo blocca sempre (decodifica -EncodedCommand
-    # via AMSI e analizza il contenuto), indipendentemente da come viene lanciato
-    # il task. Si resta quindi sull'esecuzione diretta — un breve lampeggio della
-    # console è il compromesso minimo che supera l'EDR.
+    # Script di orchestrazione (gira in Session 0 via WMI Win32_Process.Create):
+    # trova l'utente loggato, scrive PS1 + XML task, registra e avvia il task.
+    # InteractiveToken = gira nella sessione dell'utente senza bisogno della sua password.
+    orch_lines = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        "$ProgressPreference    = 'SilentlyContinue'",
+        "$proc = Get-WmiObject Win32_Process -Filter 'Name=\"explorer.exe\"' | Select-Object -First 1",
+        "if (-not $proc) { exit 1 }",
+        "$owner    = $proc.GetOwner()",
+        '$username = "$($owner.Domain)\\$($owner.User)"',
+        "$rnd  = [System.IO.Path]::GetRandomFileName().Replace('.', '')",
+        '$ps1F = "C:\\Users\\Public\\pcmon_$rnd.ps1"',
+        '$xmlF = "C:\\Users\\Public\\pcmon_$rnd.xml"',
+        '$tn   = "PcMonSS_$rnd"',
+        # Scrive PS1 da base64 (evita ogni problema di escaping)
+        f"[System.IO.File]::WriteAllBytes($ps1F, [Convert]::FromBase64String('{inner_b64}'))",
+        # Scrive XML del task con InteractiveToken (no password necessaria)
+        '$xml = @"',
+        '<?xml version="1.0" encoding="UTF-16"?>',
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+        '  <Principals><Principal id="A">',
+        '    <UserId>$username</UserId>',
+        '    <LogonType>InteractiveToken</LogonType>',
+        '    <RunLevel>LeastPrivilege</RunLevel>',
+        '  </Principal></Principals>',
+        '  <Settings>',
+        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+        '  </Settings>',
+        '  <Actions Context="A"><Exec>',
+        '    <Command>powershell.exe</Command>',
+        '    <Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$ps1F"</Arguments>',
+        '  </Exec></Actions>',
+        '</Task>',
+        '"@',
+        '$xml | Out-File $xmlF -Encoding Unicode',
+        'schtasks /create /tn $tn /xml $xmlF /f | Out-Null',
+        'schtasks /run /tn $tn | Out-Null',
+        'Start-Sleep -Seconds 3',
+        'schtasks /delete /tn $tn /f | Out-Null',
+        'Remove-Item $xmlF, $ps1F -Force -ErrorAction SilentlyContinue',
+    ]
+    orch_script = "\n".join(orch_lines)
+    orch_enc    = _b64.b64encode(orch_script.encode("utf-16-le")).decode("ascii")
 
-    # Separa dominio e utente WMI (es. STAGIT\user → domain=STAGIT, user=user)
-    if "\\" in wmi_user:
-        wmi_domain, wmi_user_only = wmi_user.split("\\", 1)
-    else:
-        wmi_domain, wmi_user_only = "", wmi_user
-
-    task_name = None
     try:
-        import wmi as wmilib, pythoncom, win32com.client
+        import wmi as wmilib, pythoncom
         pythoncom.CoInitialize()
         try:
-            # Trova utente loggato tramite WMI
             c = wmilib.WMI(computer=target, user=wmi_user, password=wmi_pass)
-            logged_user = ""
-            for proc in c.Win32_Process(Name="explorer.exe"):
-                owner = proc.GetOwner()
-                if owner[1] == 0 and owner[2]:
-                    dom = owner[0] or ""
-                    logged_user = f"{dom}\\{owner[2]}" if dom else owner[2]
-                    break
-            if not logged_user:
-                return jsonify({"error": "Nessun utente loggato sul PC"}), 400
-
-            # Connessione diretta al Task Scheduler remoto con credenziali WMI.
-            # Ogni chiamata COM è isolata in un proprio try/except: l'eccezione
-            # generica di pywin32 non indica il punto di fallimento, quindi la
-            # ripacchettiamo con un prefisso che identifica lo step (utile per
-            # distinguere "non riesco a connettermi" da "non ho i permessi per
-            # registrare il task", es. utente WMI senza diritti di admin locale).
-            def _step(name, fn):
-                try:
-                    return fn()
-                except Exception as step_exc:
-                    raise RuntimeError(f"Schedule.Service [{name}]: {step_exc}") from step_exc
-
-            sched  = _step("Dispatch", lambda: win32com.client.Dispatch("Schedule.Service"))
-            _step("Connect", lambda: sched.Connect(target, wmi_user_only, wmi_domain, wmi_pass))
-            folder = _step("GetFolder", lambda: sched.GetFolder("\\"))
-
-            # Task che esegue lo script di cattura incorporato (-EncodedCommand):
-            # nessun file scritto su disco, nessuna richiesta HTTP all'avvio —
-            # il minimo indispensabile che Bitdefender lascia passare.
-            rnd        = _sec.token_hex(6)
-            task_name  = f"PcMonSS_{rnd}"
-            task_def   = _step("NewTask", lambda: sched.NewTask(0))
-            task_def.Settings.Hidden     = True
-            task_def.Principal.UserId    = logged_user
-            task_def.Principal.LogonType = 3   # TASK_LOGON_INTERACTIVE_TOKEN
-            task_def.Principal.RunLevel  = 0   # TASK_RUNLEVEL_LUA
-            act = task_def.Actions.Create(0)   # TASK_ACTION_EXEC
-            act.Path      = "powershell.exe"
-            act.Arguments = (
-                f"-NoProfile -NonInteractive -WindowStyle Hidden "
-                f"-EncodedCommand {inner_encoded}"
+            # Avvia lo script di orchestrazione in Session 0 — ritorna subito
+            res, _pid = c.Win32_Process.Create(
+                CommandLine=(
+                    f'powershell -NoProfile -NonInteractive -WindowStyle Hidden '
+                    f'-EncodedCommand {orch_enc}'
+                )
             )
-            _step("RegisterTaskDefinition",
-                  lambda: folder.RegisterTaskDefinition(task_name, task_def, 6, None, None, 3))
-            task = _step("GetTask", lambda: folder.GetTask(f"\\{task_name}"))
-            _step("Run", lambda: task.Run(None))
+            if res != 0:
+                return jsonify({"error": f"Win32_Process.Create fallito (codice {res})"}), 500
         finally:
             pythoncom.CoUninitialize()
 
-        # Attende lo screenshot (max 30s)
+        # Attende che il PC posti lo screenshot (max 30s)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1426,23 +1019,7 @@ def get_screenshot(hostname: str):
     except Exception as e:
         with _screenshot_lock:
             _screenshot_results.pop(hostname, None)
-        return jsonify({"error": str(e)}), 500
-
-    finally:
-        # Elimina il task schedulato in background
-        if task_name:
-            def _cleanup(tn=task_name):
-                try:
-                    import pythoncom, win32com.client as _wcc
-                    pythoncom.CoInitialize()
-                    s = _wcc.Dispatch("Schedule.Service")
-                    s.Connect(target, wmi_user_only, wmi_domain, wmi_pass)
-                    s.GetFolder("\\").DeleteTask(tn, 0)
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
-            threading.Thread(target=_cleanup, daemon=True).start()
-
+        return jsonify({"error": _wmi_friendly_error(e)}), 500
 
 
 @app.route("/api/ping/<hostname>", methods=["GET"])
